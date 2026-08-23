@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+button, input, select { font: inherit; }
+
+@utility status-dot {
+  @apply inline-block size-2 shrink-0 rounded-full;
+}
+
+@utility status-dot--ready {
+  @apply bg-blue-500 shadow-[0_0_0_3px_rgb(59_130_246/0.14)];
+}
+
+@utility status-dot--copying {
+  @apply bg-amber-400 shadow-[0_0_0_3px_rgb(251_191_36/0.16)];
+}
+
+@utility status-dot--verified {
+  @apply bg-emerald-500 shadow-[0_0_0_3px_rgb(16_185_129/0.14)];
+}

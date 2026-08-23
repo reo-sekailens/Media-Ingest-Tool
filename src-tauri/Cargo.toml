@@ -1,0 +1,40 @@
+[package]
+name = "media-ingest-tool"
+version = "0.1.0"
+description = "Verified cross-platform removable-media ingest"
+authors = ["Media Ingest Tool contributors"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "media_ingest_tool_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+rusqlite = { version = "0.37", features = ["bundled"] }
+blake3 = "1.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+nom-exif = "3.6.2"
+fs2 = "0.4"
+unicode-normalization = "0.1"
+unicode-casefold = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Ole", "Win32_System_Rpc", "Win32_System_Variant", "Win32_System_Wmi", "Win32_Storage_IscsiDisc", "Win32_Devices_DeviceAndDriverInstallation"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.14", default-features = false, features = ["async-io", "blocking-api"] }

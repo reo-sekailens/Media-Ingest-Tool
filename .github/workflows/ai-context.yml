@@ -1,0 +1,26 @@
+name: AI context
+
+on:
+  pull_request:
+    paths:
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "memory-bank/**"
+      - "scripts/verify-memory-bank.ps1"
+      - ".github/workflows/ai-context.yml"
+  push:
+    branches: [main]
+    paths:
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "memory-bank/**"
+      - "scripts/verify-memory-bank.ps1"
+
+jobs:
+  verify-memory-bank:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate required context and local links
+        shell: pwsh
+        run: ./scripts/verify-memory-bank.ps1

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-calibrate-reader-slot"
+description = "Enables the calibrate_reader_slot command without any pre-configured scope."
+commands.allow = ["calibrate_reader_slot"]
+
+[[permission]]
+identifier = "deny-calibrate-reader-slot"
+description = "Denies the calibrate_reader_slot command without any pre-configured scope."
+commands.deny = ["calibrate_reader_slot"]

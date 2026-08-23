@@ -1,0 +1,25 @@
+# Secrets and local AI state
+.env
+.env.*
+!.env.example
+.codex/
+.claude/
+.cursor/
+.playwright-cli/
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+
+# Build and dependency output
+node_modules/
+dist/
+build/
+coverage/
+output/
+.cargo-target-*/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts

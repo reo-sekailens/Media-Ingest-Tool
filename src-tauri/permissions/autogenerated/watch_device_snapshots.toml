@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-watch-device-snapshots"
+description = "Enables the watch_device_snapshots command without any pre-configured scope."
+commands.allow = ["watch_device_snapshots"]
+
+[[permission]]
+identifier = "deny-watch-device-snapshots"
+description = "Denies the watch_device_snapshots command without any pre-configured scope."
+commands.deny = ["watch_device_snapshots"]

@@ -1,0 +1,11 @@
+version: 1
+repository_guidance:
+  - .github/copilot-instructions.md
+  - memory-bank/README.md
+prompt_library: .ai/prompts
+operating_principles:
+  - inspect_before_change
+  - minimize_scope
+  - protect_secrets
+  - verify_proportionally
+  - record_durable_decisions

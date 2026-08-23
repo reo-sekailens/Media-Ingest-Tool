@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resume-verified-ingest"
+description = "Enables the resume_verified_ingest command without any pre-configured scope."
+commands.allow = ["resume_verified_ingest"]
+
+[[permission]]
+identifier = "deny-resume-verified-ingest"
+description = "Denies the resume_verified_ingest command without any pre-configured scope."
+commands.deny = ["resume_verified_ingest"]

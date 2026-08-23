@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-register-card-marker"
+description = "Enables the register_card_marker command without any pre-configured scope."
+commands.allow = ["register_card_marker"]
+
+[[permission]]
+identifier = "deny-register-card-marker"
+description = "Denies the register_card_marker command without any pre-configured scope."
+commands.deny = ["register_card_marker"]

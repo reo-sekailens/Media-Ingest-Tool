@@ -1,0 +1,25 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal capability for the main media-ingest window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "allow-calibrate-reader-slot",
+    "allow-get-device-snapshot",
+    "allow-get-ingest-history",
+    "allow-scan-source-inventory",
+    "allow-get-remembered-destination",
+    "allow-remember-destination",
+    "allow-register-card-marker",
+    "allow-get-auto-ingest-profile",
+    "allow-get-format-eligibility",
+    "allow-preview-verified-ingest",
+    "allow-request-format-authorization",
+    "allow-watch-device-snapshots",
+    "allow-start-verified-ingest",
+    "allow-cancel-verified-ingest",
+    "allow-resume-verified-ingest"
+  ]
+}

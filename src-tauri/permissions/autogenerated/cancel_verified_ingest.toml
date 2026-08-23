@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cancel-verified-ingest"
+description = "Enables the cancel_verified_ingest command without any pre-configured scope."
+commands.allow = ["cancel_verified_ingest"]
+
+[[permission]]
+identifier = "deny-cancel-verified-ingest"
+description = "Denies the cancel_verified_ingest command without any pre-configured scope."
+commands.deny = ["cancel_verified_ingest"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-request-format-authorization"
+description = "Enables the request_format_authorization command without any pre-configured scope."
+commands.allow = ["request_format_authorization"]
+
+[[permission]]
+identifier = "deny-request-format-authorization"
+description = "Denies the request_format_authorization command without any pre-configured scope."
+commands.deny = ["request_format_authorization"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-verified-ingest"
+description = "Enables the preview_verified_ingest command without any pre-configured scope."
+commands.allow = ["preview_verified_ingest"]
+
+[[permission]]
+identifier = "deny-preview-verified-ingest"
+description = "Denies the preview_verified_ingest command without any pre-configured scope."
+commands.deny = ["preview_verified_ingest"]
