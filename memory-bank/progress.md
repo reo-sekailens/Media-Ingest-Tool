@@ -76,6 +76,7 @@
 - Extended the read-only Windows provider probe to reopen the opaque WMI object path and construct the actual `MSFT_Volume.Format` input from the class method signature, with non-forced quick-format values. The probe passes without invoking a destructive format.
 - Added an auto-format scheduler interlock: a mount-triggered completed ingest will not resolve or invoke a formatter while a distinct active ingest references the same immutable medium key. The unit guard covers manual, empty, and competing-ingest outcomes; the application requires a later mount-triggered ingest to reconsider automatic formatting.
 - Implemented the missing non-Windows mount trigger: macOS and Linux now start a native one-second snapshot reconciliation worker for the Tauri device channel. Registered-card auto-ingest therefore receives fresh native mount/removal generations on all supported desktop platforms rather than being Windows-only; platform-specific event subscriptions remain an optimization/certification item.
+- Read-only Windows Storage Management revalidation on 2026-08-25 found no `MSFT_Disk` object for the mounted sacrificial PRO-READER card; the provider can see only its logical volume. This confirms the reader cannot supply a whole-disk opaque target or immutable card identity through this host, so no destructive test was attempted.
 
 For active work, see [Active context](activeContext.md). For evidence requirements, see [Certification matrix](certification-matrix.md).
 

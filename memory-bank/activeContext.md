@@ -50,6 +50,7 @@ Implement the remaining TASK004 recovery/durability boundaries alongside conserv
 - Generated Git commit messages must include a context-specific imperative title and a blank-line-separated body describing material additions, changes, removals, rationale, and relevant verification or compatibility notes.
 - Auto-format is additionally interlocked with the ingest scheduler: while any other active ingest still names the same immutable medium key, the completed mount-triggered run reports `skipped` and no provider is resolved. This avoids erasing a card another operation may still be reading; a later mount-triggered ingest is required to reconsider formatting.
 - macOS and Linux now feed the same mount-triggered registered-card workflow through a native snapshot reconciler that polls once per second. It uses the same native discovery, connection-generation, source-removal cancellation, and channel-closure semantics as the Windows snapshot pipeline; it is a bounded fallback until a platform event subscription is implemented.
+- A fresh 2026-08-25 read-only Windows Storage Management probe confirmed the attached SanDisk PRO-READER card is not represented as an `MSFT_Disk` at all: the system exposes only its mounted logical volume, while all returned `MSFT_Disk` objects are internal drives. There is therefore no opaque whole-disk identifier to strengthen the existing USB-reader identity gate; formatting this card must remain unavailable.
 
 ## Open questions
 
