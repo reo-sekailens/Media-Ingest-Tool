@@ -375,3 +375,9 @@ Tool` product title beside the app icon, removing redundant local-workflow
   generation, active-ingest, remount, and sentinel gates, and issues the same
   short-lived single-use authorization. This bypasses only receipt continuity;
   no destructive hardware run was performed for this new route.
+
+- 2026-08-28 — Built the current `a26b1fb` Windows x64 NSIS installer:
+  `Media Ingest Tool_0.1.0_x64-setup.exe` (3,233,407 bytes; SHA-256
+  `D8C551B82F2DD66678CE6A23E261AC90E7B15C86BC43201B09649BDF38777792`).
+  Authenticode status is `NotSigned`; no installation or release publication
+  was performed.

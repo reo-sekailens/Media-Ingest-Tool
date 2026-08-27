@@ -33,6 +33,17 @@ Ship reproducible native desktop artifacts and publish an honest support contrac
 - Signing/notarization verification output and the published supported-platform table.
 - Packaged-app critical-path results linked back to TASK010 without substituting source builds for package evidence.
 
+## Latest local artifact
+
+2026-08-28: Commit `a26b1fb35112846fa8881f2de5916b6a04069a8e` built the
+unsigned x64 NSIS artifact
+`src-tauri/target/release/bundle/nsis/Media Ingest Tool_0.1.0_x64-setup.exe`
+(3,233,407 bytes, SHA-256
+`D8C551B82F2DD66678CE6A23E261AC90E7B15C86BC43201B09649BDF38777792`). Its
+Authenticode status is `NotSigned`. This is a local artifact creation result;
+no installer run, clean-machine test, signing, notarization, or release
+publication is claimed.
+
 ## Research sources
 
 - [Tauri distribution overview](https://v2.tauri.app/distribute/)

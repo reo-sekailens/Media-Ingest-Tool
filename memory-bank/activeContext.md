@@ -409,3 +409,11 @@ requires one current hardware-stable registered card, no active ingest, a
 native allowlisted capacity profile, a 60-second single-use token, exact target
 revalidation, remount validation, and sentinel I/O. This route intentionally
 does not write a receipt-bound format record because it has no sealed ingest.
+
+2026-08-28 installer build: the current `a26b1fb` main commit produced an
+unsigned Windows x64 NSIS installer at
+`src-tauri/target/release/bundle/nsis/Media Ingest Tool_0.1.0_x64-setup.exe`
+(3,233,407 bytes, SHA-256
+`D8C551B82F2DD66678CE6A23E261AC90E7B15C86BC43201B09649BDF38777792`).
+Authenticode reports `NotSigned`; it is a local build artifact, not a release
+or clean-machine installation result.
