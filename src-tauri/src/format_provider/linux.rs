@@ -43,6 +43,7 @@ impl PlatformFormatProvider for LinuxUdisksProvider {
         }
         Ok(ResolvedFormatTarget {
             provider_key: block,
+            current_mount_root: expected.current_mount_root.clone(),
             medium_key: expected.medium_key.clone(),
             connection_generation: expected.connection_generation,
             capacity_bytes: observed.capacity_bytes,

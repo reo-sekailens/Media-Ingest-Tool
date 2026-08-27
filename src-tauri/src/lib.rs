@@ -5,6 +5,7 @@
 //! to their respective TASK001 follow-up modules.
 
 pub mod device_discovery;
+pub mod eject_provider;
 pub mod format_profiles;
 pub mod format_provider;
 pub mod format_safety;
@@ -25,17 +26,19 @@ use std::{
     ffi::OsStr,
 };
 use tauri::ipc::Channel;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use crate::device_discovery::{DeviceDiscovery, NativeDeviceDiscovery};
 use crate::format_profiles::{recommended_profile, FormatProfile};
-use crate::format_safety::{issue_authorization, FormatAuthorization};
+use crate::format_safety::{consume_authorization, issue_authorization, FormatAuthorization};
 use crate::identity::{derive_key, IdentityScope};
 use crate::ingest::{
     destination_lease_key, enumerate_regular_files, has_destination_space, manifest_root,
-    validate_ingest_roots, verified_copy_batch_planned_with_progress, verify_existing_copy,
-    write_receipt, CopyProgressCallback, DestinationLeaseRegistry, IngestError, IngestReceipt,
-    PlannedCopyFile, ReceiptFile, WorkerLimits, MANIFEST_ALGORITHM,
+    validate_ingest_roots, verified_copy_batch_planned_with_progress,
+    verified_copy_batch_planned_with_progress_positions, verify_existing_copy_with_progress,
+    write_receipt, CopyProgress, CopyProgressCallback, CopyProgressStage, DestinationLeaseRegistry,
+    IngestError, IngestReceipt, PlannedCopyFile, ReceiptFile, VerificationProgress, WorkerLimits,
+    MANIFEST_ALGORITHM,
 };
 use crate::local_store::{
     IngestHistoryEntry, IngestRunState, LocalStore, MarkerIngestProfile, PlannedFileRecord,
@@ -60,6 +63,7 @@ struct AppState {
 struct ConnectionGenerationTracker {
     next_generation: u64,
     present: HashMap<String, u64>,
+    seeded_from_store: bool,
 }
 
 struct ActiveIngest {
@@ -234,6 +238,8 @@ pub struct ProgressUpdate {
     pub state: IngestState,
     pub transferred_bytes: u64,
     pub total_bytes: Option<u64>,
+    pub current_file_index: Option<usize>,
+    pub total_files: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -354,11 +360,45 @@ pub struct FormatAuthorizationRequest {
     pub source_identity_confidence: IdentityConfidence,
 }
 
+/// The webview identifies only the completed run and native source identity.
+/// The backend re-resolves the current mount and never accepts a drive path.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SafeEjectRequest {
+    pub run_id: String,
+    pub source_medium_key: String,
+    pub source_generation: u64,
+    pub source_identity_confidence: IdentityConfidence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafeEjectResult {
+    pub source_medium_key: String,
+    pub source_generation: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FormatAuthorizationResult {
     pub confirmation_token: String,
     pub expires_in_seconds: u8,
+}
+
+/// The confirmation UI may submit only the short-lived opaque token it was
+/// just issued. Target identity, mount discovery, and profile selection stay
+/// exclusively on the native side of the boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecuteFormatAuthorizationRequest {
+    pub confirmation_token: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatExecutionResult {
+    pub profile_id: String,
+    pub marker_restored: bool,
 }
 
 /// Non-destructive explanation of the same conditions required before a
@@ -419,6 +459,7 @@ pub struct CardRegistrationRequest {
 pub struct CardRegistration {
     pub registered: bool,
     pub auto_ingest_enabled: bool,
+    pub auto_ingest_already_completed: bool,
     pub auto_format_enabled: bool,
     pub destination_path: Option<String>,
     pub sort_mode: Option<IngestSortMode>,
@@ -676,6 +717,7 @@ fn register_card_marker(
         Ok(()) => IpcResponse::success(CardRegistration {
             registered: true,
             auto_ingest_enabled: profile.auto_ingest_enabled,
+            auto_ingest_already_completed: false,
             auto_format_enabled: profile.auto_format_enabled,
             destination_path: Some(profile.destination_path),
             sort_mode: ingest_sort_mode_from_name(&profile.sort_mode),
@@ -711,6 +753,7 @@ fn get_auto_ingest_profile(
         return IpcResponse::success(CardRegistration {
             registered: false,
             auto_ingest_enabled: false,
+            auto_ingest_already_completed: false,
             auto_format_enabled: false,
             destination_path: None,
             sort_mode: None,
@@ -725,6 +768,7 @@ fn get_auto_ingest_profile(
             return IpcResponse::success(CardRegistration {
                 registered: false,
                 auto_ingest_enabled: false,
+                auto_ingest_already_completed: false,
                 auto_format_enabled: false,
                 destination_path: None,
                 sort_mode: None,
@@ -740,18 +784,49 @@ fn get_auto_ingest_profile(
         );
     };
     match store.marker_ingest_profile(&marker_token) {
-        Ok(Some(profile)) => IpcResponse::success(CardRegistration {
-            registered: true,
-            auto_ingest_enabled: profile.auto_ingest_enabled,
-            auto_format_enabled: profile.auto_format_enabled,
-            destination_path: Some(profile.destination_path),
-            sort_mode: ingest_sort_mode_from_name(&profile.sort_mode),
-            interval_minutes: profile.interval_minutes,
-            marker_status: SourceMarkerStatus::Recognized,
-        }),
+        Ok(Some(profile)) => {
+            let already_completed = match store.has_completed_auto_ingest_for_source(
+                &current[0].identity.media_key,
+                current[0].connection_generation,
+            ) {
+                Ok(true) => true,
+                Ok(false) => {
+                    // A completed auto-format can briefly make this same
+                    // mounted card appear as a fresh generation while the
+                    // provider validates and restores its marker. Suppress
+                    // only that empty post-format state. The next camera
+                    // mount containing any source file remains eligible.
+                    store
+                        .has_completed_format_for_source(&current[0].identity.media_key)
+                        .unwrap_or(false)
+                        && enumerate_regular_files(&root)
+                            .map(|files| files.is_empty())
+                            .unwrap_or(false)
+                }
+                Err(_) => {
+                    return IpcResponse::failure(
+                        IpcErrorCode::DeviceUnavailable,
+                        "The local auto-ingest history could not be read",
+                    )
+                }
+            };
+            IpcResponse::success(CardRegistration {
+                registered: true,
+                auto_ingest_enabled: profile.auto_ingest_enabled,
+                // The native ledger, rather than a per-webview Set, prevents a
+                // restart from copying the same mounted card again.
+                auto_ingest_already_completed: already_completed,
+                auto_format_enabled: profile.auto_format_enabled,
+                destination_path: Some(profile.destination_path),
+                sort_mode: ingest_sort_mode_from_name(&profile.sort_mode),
+                interval_minutes: profile.interval_minutes,
+                marker_status: SourceMarkerStatus::Recognized,
+            })
+        }
         Ok(None) => IpcResponse::success(CardRegistration {
             registered: false,
             auto_ingest_enabled: false,
+            auto_ingest_already_completed: false,
             auto_format_enabled: false,
             destination_path: None,
             sort_mode: None,
@@ -798,6 +873,28 @@ fn current_source_for_ingest_request<'a>(
     })
 }
 
+/// Recovery accepts the exact still-mounted insertion even when the host can
+/// only observe mutable continuity evidence. A generation change is accepted
+/// solely for a hardware-immutable identity; a marker, drive letter, or mount
+/// must never make a removed/replaced card eligible for recovery.
+fn current_source_for_recovery<'a>(
+    snapshot: &'a DeviceSnapshot,
+    recovery: &RecoverableIngestRun,
+) -> Option<&'a StorageDevice> {
+    let mount_key = mount_match_key(&recovery.source_root);
+    snapshot.devices.iter().find(|device| {
+        device.state == DeviceState::Available
+            && device.identity.media_key == recovery.source_identity_key
+            && device
+                .details
+                .mount_locations
+                .iter()
+                .any(|mount| mount_match_key(mount) == mount_key)
+            && (device.connection_generation == recovery.source_generation
+                || device.identity.confidence == IdentityConfidence::HardwareImmutable)
+    })
+}
+
 /// Reports the current non-destructive quick-format gate without issuing an
 /// authorization token or permitting a destructive operation.
 #[tauri::command]
@@ -806,6 +903,121 @@ fn get_format_eligibility(
     state: State<'_, AppState>,
 ) -> IpcResponse<FormatEligibility> {
     IpcResponse::success(evaluate_format_eligibility(&request, &state))
+}
+
+/// Eject is permitted only after an exact completed receipt is sealed for the
+/// currently re-observed card, and never while this app is still ingesting
+/// from it. Unlike format, safe removal is non-destructive, so a current
+/// uniquely-resolved mount/generation is sufficient even where the reader
+/// cannot expose an immutable card identifier. The native provider receives
+/// the resolved mount, not an IPC path, and must acquire an exclusive OS
+/// handle before ejecting.
+#[tauri::command]
+async fn safe_eject(
+    request: SafeEjectRequest,
+    state: State<'_, AppState>,
+) -> Result<IpcResponse<SafeEjectResult>, IpcError> {
+    let mount_root = match safe_eject_mount(&request, &state) {
+        Ok(mount_root) => mount_root,
+        Err(message) => {
+            return Ok(IpcResponse::failure(
+                IpcErrorCode::DeviceUnavailable,
+                message,
+            ));
+        }
+    };
+    Ok(
+        match tauri::async_runtime::spawn_blocking(move || {
+            crate::eject_provider::safe_eject(&mount_root)
+        })
+        .await
+        {
+            Ok(Ok(())) => IpcResponse::success(SafeEjectResult {
+                source_medium_key: request.source_medium_key,
+                source_generation: request.source_generation,
+            }),
+            Ok(Err(crate::eject_provider::SafeEjectError::UnsupportedPlatform)) => {
+                IpcResponse::failure(
+                    IpcErrorCode::UnsupportedPlatform,
+                    "Safe eject is not available on this platform yet",
+                )
+            }
+            Ok(Err(crate::eject_provider::SafeEjectError::DeviceBusy(veto_name))) => {
+                let detail = veto_name
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| format!(" Windows reported: {value}."))
+                    .unwrap_or_default();
+                IpcResponse::failure(
+                    IpcErrorCode::DeviceUnavailable,
+                    format!(
+                        "Windows could not safely remove this card because it is still in use. Close any app or file browser using it, then try again.{detail}"
+                    ),
+                )
+            }
+            Ok(Err(crate::eject_provider::SafeEjectError::DeviceNotEjectable)) => {
+                IpcResponse::failure(
+                    IpcErrorCode::DeviceUnavailable,
+                    "Windows could not safely remove this card device; remove it manually only after Windows reports it safe",
+                )
+            }
+            Ok(Err(crate::eject_provider::SafeEjectError::EjectFailed)) | Err(_) => {
+                IpcResponse::failure(
+                    IpcErrorCode::DeviceUnavailable,
+                    "Windows could not confirm that this card was safely ejected",
+                )
+            }
+        },
+    )
+}
+
+fn safe_eject_mount(request: &SafeEjectRequest, state: &AppState) -> Result<PathBuf, &'static str> {
+    if request.run_id.trim().is_empty() || request.source_medium_key.trim().is_empty() {
+        return Err("A completed ingest receipt and current source card are required");
+    }
+    if state
+        .active_ingests
+        .lock()
+        .map(|active| {
+            active
+                .values()
+                .any(|ingest| ingest.source_medium_key == request.source_medium_key)
+        })
+        .unwrap_or(true)
+    {
+        return Err("The source card is still participating in an ingest");
+    }
+    let has_receipt = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| {
+            store
+                .has_completed_receipt_for_source(
+                    &request.run_id,
+                    &request.source_medium_key,
+                    request.source_generation,
+                )
+                .ok()
+        })
+        .unwrap_or(false);
+    if !has_receipt {
+        return Err("No sealed completed receipt matches the current source card");
+    }
+    let snapshot = native_device_snapshot(&state.store, &state.connection_generations);
+    let devices = snapshot
+        .devices
+        .iter()
+        .filter(|device| {
+            device.state == DeviceState::Available
+                && device.identity.media_key == request.source_medium_key
+                && device.connection_generation == request.source_generation
+                && device.details.mount_locations.len() == 1
+        })
+        .collect::<Vec<_>>();
+    if devices.len() != 1 {
+        return Err("The verified source card is no longer uniquely present");
+    }
+    Ok(PathBuf::from(&devices[0].details.mount_locations[0]))
 }
 
 /// Establishes the non-destructive half of the quick-format protocol. A
@@ -857,6 +1069,254 @@ fn request_format_authorization(
     })
 }
 
+/// Consumes a fresh confirmation token and performs the native-only format
+/// sequence. The token is removed before the second device observation, so a
+/// disappearing card, an expired token, or a failed provider attempt can
+/// never be retried by replaying the same confirmation.
+#[tauri::command]
+fn execute_format_authorization(
+    request: ExecuteFormatAuthorizationRequest,
+    state: State<'_, AppState>,
+) -> IpcResponse<FormatExecutionResult> {
+    if request.confirmation_token.trim().is_empty() {
+        return IpcResponse::failure(
+            IpcErrorCode::InvalidRequest,
+            "A fresh quick-format confirmation is required",
+        );
+    }
+    let preview = match state.format_authorizations.lock() {
+        Ok(authorizations) => authorizations.get(&request.confirmation_token).cloned(),
+        Err(_) => None,
+    };
+    let Some(preview) = preview else {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "The quick-format confirmation is no longer available",
+        );
+    };
+    let snapshot = native_device_snapshot(&state.store, &state.connection_generations);
+    let matching = snapshot
+        .devices
+        .iter()
+        .filter(|device| {
+            device.state == DeviceState::Available
+                && device.identity.media_key == preview.medium_key
+                && device.connection_generation == preview.generation
+                && device.details.mount_locations.len() == 1
+        })
+        .collect::<Vec<_>>();
+    let Some(device) = (matching.len() == 1).then(|| matching[0]) else {
+        // Consume on a changed or unavailable device, even before a provider
+        // is reached, so no stale UI confirmation can be replayed.
+        if let Ok(mut authorizations) = state.format_authorizations.lock() {
+            let _ = consume_authorization(
+                &mut authorizations,
+                &request.confirmation_token,
+                &preview.medium_key,
+                preview.generation,
+                std::time::SystemTime::now(),
+            );
+        }
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "The confirmed card is no longer uniquely present",
+        );
+    };
+    let Some(profile) = recommended_profile(device.details.total_bytes) else {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "No safe generic format profile is available for this card capacity",
+        );
+    };
+    let Ok(mut authorizations) = state.format_authorizations.lock() else {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "The quick-format authorization store is unavailable",
+        );
+    };
+    let authorization = match consume_authorization(
+        &mut authorizations,
+        &request.confirmation_token,
+        &device.identity.media_key,
+        device.connection_generation,
+        std::time::SystemTime::now(),
+    ) {
+        Ok(authorization) => authorization,
+        Err(_) => {
+            return IpcResponse::failure(
+                IpcErrorCode::DeviceUnavailable,
+                "The quick-format confirmation expired or no longer matches this card",
+            )
+        }
+    };
+    drop(authorizations);
+    if authorization.profile_id != profile.id {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "The card capacity changed after confirmation",
+        );
+    }
+    let has_receipt = state.store.lock().ok().and_then(|store| {
+        store
+            .has_completed_receipt_for_source(
+                &authorization.run_id,
+                &authorization.medium_key,
+                authorization.generation,
+            )
+            .ok()
+    }) == Some(true);
+    if !has_receipt {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "The sealed verification receipt is no longer current for this card",
+        );
+    }
+    let managed_card_matches = state
+        .store
+        .lock()
+        .map(|store| managed_card_matches_sealed_receipt(&store, &authorization.run_id, device))
+        .unwrap_or(false);
+    if !managed_card_matches {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "The registered managed-card witness no longer matches the sealed receipt",
+        );
+    }
+    let Some(capacity) = device.details.total_bytes else {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "Card capacity is unavailable",
+        );
+    };
+    let expected = crate::format_provider::ExpectedFormatTarget {
+        medium_key: authorization.medium_key.clone(),
+        connection_generation: authorization.generation,
+        expected_capacity_bytes: capacity,
+        current_mount_root: PathBuf::from(&device.details.mount_locations[0]),
+    };
+    let pre_format_device = device.clone();
+    let profile_id = profile.id.to_owned();
+    // Preserve an optional registered-card marker before the provider erases
+    // the filesystem. It is restored only after remount and exact immutable
+    // identity revalidation below.
+    let marker_token = crate::storage_marker::read_marker(&expected.current_mount_root)
+        .ok()
+        .flatten()
+        .and_then(|marker| {
+            state
+                .store
+                .lock()
+                .ok()
+                .and_then(|store| store.marker_ingest_profile(&marker).ok().flatten())
+                .map(|registered| registered.marker_token)
+        });
+    let profile_id_for_receipt = profile_id.clone();
+    let store = Arc::clone(&state.store);
+    let connection_generations = Arc::clone(&state.connection_generations);
+    let run_id = authorization.run_id.clone();
+    let medium_key = authorization.medium_key.clone();
+    let generation = authorization.generation;
+    let outcome: Result<bool, crate::format_provider::FormatProviderError> = (move || {
+        let provider = crate::format_provider::current_platform_provider();
+        let target = provider.resolve_exact_target(&expected)?;
+        provider.quick_format(&target, &profile)?;
+        let validated = provider.wait_for_validated_mount(&expected, &profile)?;
+        // The managed marker must be gone before this workflow can claim a
+        // format occurred. A matching exFAT mount alone is not evidence: the
+        // pre-format card can have that same filesystem.
+        if crate::storage_marker::read_record(&validated.root)
+            .map_err(|_| crate::format_provider::FormatProviderError::ValidationFailed)?
+            .is_some()
+        {
+            return Err(crate::format_provider::FormatProviderError::ValidationFailed);
+        }
+        sentinel_round_trip(&validated.root)
+            .map_err(|_| crate::format_provider::FormatProviderError::ValidationFailed)?;
+        let post_format = native_device_snapshot(&store, &connection_generations);
+        let exact_target_present = post_format.devices.iter().any(|device| {
+            same_managed_format_target(&pre_format_device, device, &validated.root, capacity)
+        });
+        if !exact_target_present {
+            return Err(crate::format_provider::FormatProviderError::TargetChanged);
+        }
+        let marker_restored = match marker_token {
+            Some(marker_token) => {
+                crate::storage_marker::restore_marker(&validated.root, &marker_token)
+                    .map(|_| true)
+                    .map_err(|_| crate::format_provider::FormatProviderError::ValidationFailed)?
+            }
+            None => false,
+        };
+        let recorded = store.lock().ok().and_then(|mut store| {
+            store
+                .record_completed_format(&run_id, &medium_key, generation, &profile_id_for_receipt)
+                .ok()
+        }) == Some(true);
+        if !recorded {
+            return Err(crate::format_provider::FormatProviderError::ValidationFailed);
+        }
+        Ok(marker_restored)
+    })();
+    match outcome {
+        Ok(marker_restored) => IpcResponse::success(FormatExecutionResult {
+            profile_id,
+            marker_restored,
+        }),
+        Err(error) => IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            format_provider_error_message(error),
+        ),
+    }
+}
+
+fn format_provider_error_message(error: crate::format_provider::FormatProviderError) -> String {
+    match error {
+        crate::format_provider::FormatProviderError::UnsupportedPlatform => {
+            "Quick format is not available on this platform".into()
+        }
+        crate::format_provider::FormatProviderError::TargetUnavailable
+        | crate::format_provider::FormatProviderError::TargetChanged => {
+            "The confirmed card changed or is no longer available".into()
+        }
+        crate::format_provider::FormatProviderError::TargetReopenFailed => {
+            "Windows could not reopen the exact native volume target".into()
+        }
+        crate::format_provider::FormatProviderError::TargetCapacityMismatch => {
+            "Windows reported a different capacity for the confirmed volume".into()
+        }
+        crate::format_provider::FormatProviderError::NotRemovable => {
+            "The selected device is not removable media".into()
+        }
+        crate::format_provider::FormatProviderError::WriteProtected => {
+            "The card is write-protected".into()
+        }
+        crate::format_provider::FormatProviderError::Busy => {
+            "The card is in use; close applications using it and try again".into()
+        }
+        crate::format_provider::FormatProviderError::FormatInputFailed => {
+            "Windows rejected the documented native format input".into()
+        }
+        crate::format_provider::FormatProviderError::FormatOutputMissing => {
+            "Windows returned no native format result".into()
+        }
+        crate::format_provider::FormatProviderError::FormatResultUnreadable => {
+            "Windows returned an unreadable native format result".into()
+        }
+        crate::format_provider::FormatProviderError::FormatFailed => {
+            "Windows could not quick-format the confirmed card".into()
+        }
+        crate::format_provider::FormatProviderError::FormatFailedWithCode(code) => {
+            format!("Windows native quick format failed with status 0x{code:08X}")
+        }
+        crate::format_provider::FormatProviderError::RemountFailed => {
+            "The card did not remount after quick format".into()
+        }
+        crate::format_provider::FormatProviderError::ValidationFailed => {
+            "Quick format completed but the post-format validation did not pass".into()
+        }
+    }
+}
+
 fn evaluate_format_eligibility(
     request: &FormatAuthorizationRequest,
     state: &AppState,
@@ -869,9 +1329,6 @@ fn evaluate_format_eligibility(
     if request.run_id.trim().is_empty() || request.source_medium_key.trim().is_empty() {
         return blocked("A completed ingest run and current source medium are required");
     }
-    if request.source_identity_confidence != IdentityConfidence::HardwareImmutable {
-        return blocked("Quick format requires a currently verified immutable medium identity");
-    }
     let snapshot = native_device_snapshot(&state.store, &state.connection_generations);
     let current_devices = snapshot
         .devices
@@ -879,8 +1336,8 @@ fn evaluate_format_eligibility(
         .filter(|device| {
             device.state == DeviceState::Available
                 && device.identity.media_key == request.source_medium_key
-                && device.identity.confidence == IdentityConfidence::HardwareImmutable
                 && device.connection_generation == request.source_generation
+                && device.details.mount_locations.len() == 1
         })
         .collect::<Vec<_>>();
     if current_devices.len() != 1 {
@@ -901,22 +1358,21 @@ fn evaluate_format_eligibility(
     {
         return blocked("The source medium is still participating in an ingest");
     }
-    let has_receipt = match state.store.lock() {
-        Ok(store) => store
-            .has_completed_receipt_for_source(
-                &request.run_id,
-                &request.source_medium_key,
-                request.source_generation,
-            )
-            .unwrap_or(false),
+    let managed_card_matches = match state.store.lock() {
+        Ok(store) => {
+            managed_card_matches_sealed_receipt(&store, &request.run_id, current_devices[0])
+        }
         Err(_) => false,
     };
-    if !has_receipt {
-        return blocked("No sealed completed receipt matches the current source medium");
+    if !managed_card_matches {
+        return blocked(
+            "This card is not the current registered managed card for the sealed receipt",
+        );
     }
     FormatEligibility {
         eligible: true,
-        reason: "Receipt and exact medium identity are ready for a platform formatter".into(),
+        reason: "Receipt and current managed-card witness are ready for the platform formatter"
+            .into(),
         recommended_profile: Some(profile),
     }
 }
@@ -928,13 +1384,31 @@ fn native_device_snapshot(
     let discovery = NativeDeviceDiscovery;
     let sequence = SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
     let mut snapshot = snapshot_from_volumes(sequence, discovery.enumerate_removable_volumes());
-    if let Ok(store) = store.lock() {
+    let persisted_generations = if let Ok(store) = store.lock() {
         apply_calibrated_slots(&mut snapshot, &store);
-    }
+        store.latest_source_generations().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if let Ok(mut tracker) = connection_generations.lock() {
+        seed_connection_generations(&mut tracker, persisted_generations);
         assign_connection_generations(&mut snapshot, &mut tracker);
     }
     snapshot
+}
+
+fn seed_connection_generations(
+    tracker: &mut ConnectionGenerationTracker,
+    persisted_generations: impl IntoIterator<Item = (String, u64)>,
+) {
+    if tracker.seeded_from_store {
+        return;
+    }
+    for (identity_key, generation) in persisted_generations {
+        tracker.next_generation = tracker.next_generation.max(generation);
+        tracker.present.insert(identity_key, generation);
+    }
+    tracker.seeded_from_store = true;
 }
 
 fn assign_connection_generations(
@@ -1012,6 +1486,13 @@ fn cancel_missing_active_sources(
     }
 }
 
+fn has_active_ingests(active_ingests: &Mutex<HashMap<String, ActiveIngest>>) -> bool {
+    active_ingests
+        .lock()
+        .map(|active| !active.is_empty())
+        .unwrap_or(true)
+}
+
 fn send_reconciled_device_snapshot(
     channel: &Channel<DeviceSnapshot>,
     store: &Mutex<LocalStore>,
@@ -1060,7 +1541,9 @@ fn watch_device_snapshots(
         ) {
             return;
         }
-        while subscription.recv().is_ok() {
+        while let Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+            subscription.recv_timeout(Duration::from_secs(1))
+        {
             if !send_reconciled_device_snapshot(
                 &channel,
                 &store,
@@ -1263,19 +1746,7 @@ async fn resume_verified_ingest(
         ));
     }
     let snapshot = native_device_snapshot(&state.store, &state.connection_generations);
-    let Some(observed) = snapshot.devices.iter().find(|device| {
-        device.state == DeviceState::Available
-            && device.identity.media_key == recovery.source_identity_key
-            // A new generation is acceptable only for the exact same
-            // hardware-immutable medium. A reused mount or mutable marker is
-            // never enough to continue an interrupted ingest.
-            && device.identity.confidence == IdentityConfidence::HardwareImmutable
-            && device
-                .details
-                .mount_locations
-                .iter()
-                .any(|mount| mount_match_key(mount) == mount_match_key(&recovery.source_root))
-    }) else {
+    let Some(observed) = current_source_for_recovery(&snapshot, &recovery) else {
         return Ok(IpcResponse::failure(
             IpcErrorCode::DeviceUnavailable,
             "The exact source card generation is not currently mounted for recovery",
@@ -1351,19 +1822,28 @@ async fn resume_verified_ingest(
     );
     let copy_channel = channel.clone();
     let progress_operation_id = operation_id.clone();
-    let transferred = Arc::new(AtomicU64::new(0));
-    let transferred_by_worker = Arc::clone(&transferred);
+    let copied_transferred = Arc::new(AtomicU64::new(0));
+    let copied_by_worker = Arc::clone(&copied_transferred);
+    let verified_transferred = Arc::new(AtomicU64::new(0));
+    let verified_by_worker = Arc::clone(&verified_transferred);
     let destination_leases = Arc::clone(&state.destination_leases);
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _destination_lease = destination_leases.acquire(destination_key);
-        let progress: CopyProgressCallback = Arc::new(move |bytes| {
-            let total = transferred_by_worker.fetch_add(bytes, Ordering::Relaxed) + bytes;
-            send_progress(
+        let progress: CopyProgressCallback = Arc::new(move |update| {
+            let total = match update.stage {
+                CopyProgressStage::Copying => {
+                    copied_by_worker.fetch_add(update.bytes, Ordering::Relaxed) + update.bytes
+                }
+                CopyProgressStage::Verifying => {
+                    verified_by_worker.fetch_add(update.bytes, Ordering::Relaxed) + update.bytes
+                }
+            };
+            send_copy_progress(
                 &copy_channel,
                 &progress_operation_id,
-                IngestState::Copying,
                 total,
                 Some(planned_bytes),
+                update,
             );
         });
         execute_recovery_ingest(prepared, cancellation, Some(progress))
@@ -1390,7 +1870,10 @@ async fn resume_verified_ingest(
                     return Ok(persistence_failure());
                 }
             }
-            completed.summary.source_marker_status = source_marker_status(&completed.source_root);
+            let managed_witness =
+                managed_card_witness(&completed.summary, &completed.manifest_root_blake3, &state);
+            completed.summary.source_marker_status =
+                source_marker_status_with_content_witness(&completed.source_root, &managed_witness);
             send_progress(
                 &channel,
                 &operation_id,
@@ -1401,10 +1884,16 @@ async fn resume_verified_ingest(
             completed.summary.auto_format_status = run_auto_format_after_verified_ingest(
                 &completed.summary,
                 &completed.source_root,
+                Some(&managed_witness),
                 completed.auto_ingest_triggered,
                 &state,
             )
             .await;
+            record_auto_format_outcome(
+                &state,
+                &operation_id,
+                &completed.summary.auto_format_status,
+            );
             send_progress(
                 &channel,
                 &operation_id,
@@ -1425,7 +1914,7 @@ async fn resume_verified_ingest(
                 &channel,
                 &operation_id,
                 progress_state_for_error(&error),
-                transferred.load(Ordering::Relaxed),
+                copied_transferred.load(Ordering::Relaxed),
                 Some(planned_bytes),
             );
             Ok(error_response(error))
@@ -1525,6 +2014,24 @@ async fn start_verified_ingest(
         .iter()
         .map(|file| file.source.byte_length)
         .sum::<u64>();
+    // A post-format remount can reach this command before the profile lookup
+    // observes the recorded format receipt. Never persist an empty automatic
+    // run: it has no media receipt to seal and must not turn a harmless race
+    // into a failed ingest history row.
+    if skips_empty_auto_ingest(&prepared.request, prepared.files.len()) {
+        let summary = VerifiedIngestResult {
+            operation_id: operation_id.clone(),
+            source_medium_key: prepared.request.source_medium_key.clone(),
+            source_generation: prepared.request.source_generation,
+            copied_files: 0,
+            copied_bytes: 0,
+            receipt_name: String::new(),
+            source_marker_status: source_marker_status(&prepared.source_root),
+            auto_format_status: AutoFormatStatus::Skipped,
+        };
+        send_progress(&channel, &operation_id, IngestState::Completed, 0, Some(0));
+        return Ok(IpcResponse::success(summary));
+    }
     let preflight = validate_ingest_roots(&prepared.source_root, &prepared.destination_root)
         .and_then(|()| {
             has_destination_space(&prepared.destination_root, planned_bytes).and_then(|has_space| {
@@ -1568,12 +2075,13 @@ async fn start_verified_ingest(
             return Ok(persistence_failure());
         };
         if store
-            .begin_ingest_run(
+            .begin_ingest_run_with_mode(
                 &operation_id,
                 &source_identity,
                 prepared.request.source_generation,
                 &prepared.source_root.to_string_lossy(),
                 &prepared.destination_root.to_string_lossy(),
+                prepared.request.auto_ingest_triggered,
             )
             .is_err()
         {
@@ -1632,19 +2140,28 @@ async fn start_verified_ingest(
     }
     let copy_channel = channel.clone();
     let progress_operation_id = operation_id.clone();
-    let transferred = Arc::new(AtomicU64::new(0));
-    let transferred_by_worker = Arc::clone(&transferred);
+    let copied_transferred = Arc::new(AtomicU64::new(0));
+    let copied_by_worker = Arc::clone(&copied_transferred);
+    let verified_transferred = Arc::new(AtomicU64::new(0));
+    let verified_by_worker = Arc::clone(&verified_transferred);
     let destination_leases = Arc::clone(&state.destination_leases);
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _destination_lease = destination_leases.acquire(destination_key);
-        let progress: CopyProgressCallback = Arc::new(move |bytes| {
-            let total = transferred_by_worker.fetch_add(bytes, Ordering::Relaxed) + bytes;
-            send_progress(
+        let progress: CopyProgressCallback = Arc::new(move |update| {
+            let total = match update.stage {
+                CopyProgressStage::Copying => {
+                    copied_by_worker.fetch_add(update.bytes, Ordering::Relaxed) + update.bytes
+                }
+                CopyProgressStage::Verifying => {
+                    verified_by_worker.fetch_add(update.bytes, Ordering::Relaxed) + update.bytes
+                }
+            };
+            send_copy_progress(
                 &copy_channel,
                 &progress_operation_id,
-                IngestState::Copying,
                 total,
                 Some(planned_bytes),
+                update,
             );
         });
         execute_prepared_ingest(prepared, cancellation, Some(progress))
@@ -1686,7 +2203,10 @@ async fn start_verified_ingest(
                     return Ok(persistence_failure());
                 }
             }
-            completed.summary.source_marker_status = source_marker_status(&completed.source_root);
+            let managed_witness =
+                managed_card_witness(&completed.summary, &completed.manifest_root_blake3, &state);
+            completed.summary.source_marker_status =
+                source_marker_status_with_content_witness(&completed.source_root, &managed_witness);
             send_progress(
                 &channel,
                 &operation_id,
@@ -1697,10 +2217,16 @@ async fn start_verified_ingest(
             completed.summary.auto_format_status = run_auto_format_after_verified_ingest(
                 &completed.summary,
                 &completed.source_root,
+                Some(&managed_witness),
                 completed.auto_ingest_triggered,
                 &state,
             )
             .await;
+            record_auto_format_outcome(
+                &state,
+                &operation_id,
+                &completed.summary.auto_format_status,
+            );
             send_progress(
                 &channel,
                 &operation_id,
@@ -1721,7 +2247,7 @@ async fn start_verified_ingest(
                 &channel,
                 &operation_id,
                 progress_state_for_error(&error),
-                transferred.load(Ordering::Relaxed),
+                copied_transferred.load(Ordering::Relaxed),
                 Some(planned_bytes),
             );
             Ok(error_response(error))
@@ -1737,7 +2263,7 @@ async fn start_verified_ingest(
                 &channel,
                 &operation_id,
                 IngestState::Failed,
-                transferred.load(Ordering::Relaxed),
+                copied_transferred.load(Ordering::Relaxed),
                 Some(planned_bytes),
             );
             Ok(persistence_failure())
@@ -1798,6 +2324,29 @@ fn send_progress(
         state,
         transferred_bytes,
         total_bytes,
+        current_file_index: None,
+        total_files: None,
+    });
+}
+
+fn send_copy_progress(
+    channel: &Channel<ProgressUpdate>,
+    operation_id: &str,
+    transferred_bytes: u64,
+    total_bytes: Option<u64>,
+    update: CopyProgress,
+) {
+    let _ = channel.send(ProgressUpdate {
+        sequence: PROGRESS_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1,
+        operation_id: operation_id.into(),
+        state: match update.stage {
+            CopyProgressStage::Copying => IngestState::Copying,
+            CopyProgressStage::Verifying => IngestState::Verifying,
+        },
+        transferred_bytes,
+        total_bytes,
+        current_file_index: Some(update.file_index),
+        total_files: Some(update.total_files),
     });
 }
 
@@ -1885,7 +2434,7 @@ fn prepare_recovery_ingest(
             max_workers,
             sort_mode: IngestSortMode::OriginalTree,
             interval_minutes: None,
-            auto_ingest_triggered: false,
+            auto_ingest_triggered: recovery.auto_ingest_triggered,
         },
         operation_id: recovery.run_id.clone(),
         source_root,
@@ -1928,26 +2477,33 @@ fn execute_recovery_ingest(
 ) -> Result<CompletedIngest, IngestError> {
     let mut existing = Vec::new();
     let mut missing = Vec::new();
-    for file in &prepared.files {
+    let total_files = prepared.files.len();
+    for (index, file) in prepared.files.iter().enumerate() {
         let final_path = prepared
             .destination_root
             .join(&file.destination_relative_path);
         if final_path.exists() {
-            existing.push(verify_existing_copy(
+            existing.push(verify_existing_copy_with_progress(
                 &prepared.source_root,
                 &file.source,
                 &file.destination_relative_path,
                 &file.entry_id,
                 &prepared.destination_root,
                 &cancellation,
+                progress.clone().map(|callback| VerificationProgress {
+                    callback,
+                    file_index: index + 1,
+                    total_files,
+                }),
             )?);
         } else {
-            missing.push(file.clone());
+            missing.push((index + 1, file.clone()));
         }
     }
-    let copied = verified_copy_batch_planned_with_progress(
+    let copied = verified_copy_batch_planned_with_progress_positions(
         &prepared.source_root,
         missing,
+        total_files,
         &prepared.destination_root,
         WorkerLimits {
             max_workers: prepared.request.max_workers.clamp(1, 16),
@@ -2050,17 +2606,139 @@ fn source_marker_status(source_root: &std::path::Path) -> SourceMarkerStatus {
     }
 }
 
+fn skips_empty_auto_ingest(request: &VerifiedIngestRequest, file_count: usize) -> bool {
+    request.auto_ingest_triggered && file_count == 0
+}
+
+/// A completed ingest leaves a compact, path-free witness of the exact
+/// verified media manifest alongside its random managed-card token. This is
+/// useful continuity evidence only: it remains copyable filesystem state.
+fn source_marker_status_with_content_witness(
+    source_root: &std::path::Path,
+    manifest_root_blake3: &str,
+) -> SourceMarkerStatus {
+    match crate::storage_marker::ensure_marker_with_fingerprint(source_root, manifest_root_blake3) {
+        Ok(crate::storage_marker::MarkerState::Existing) => SourceMarkerStatus::Recognized,
+        Ok(crate::storage_marker::MarkerState::Created) => SourceMarkerStatus::Created,
+        Err(_) => SourceMarkerStatus::Unavailable,
+    }
+}
+
+/// Hashes bounded current host observations with the sealed media manifest.
+/// The resulting value detects ordinary card/content swaps better than the
+/// token alone while retaining no mount path, label, raw serial, or filename.
+fn managed_card_witness(
+    result: &VerifiedIngestResult,
+    manifest_root_blake3: &str,
+    state: &AppState,
+) -> String {
+    let snapshot = native_device_snapshot(&state.store, &state.connection_generations);
+    let device = snapshot.devices.iter().find(|device| {
+        device.state == DeviceState::Available
+            && device.identity.media_key == result.source_medium_key
+            && device.connection_generation == result.source_generation
+    });
+    device.map_or_else(
+        || managed_card_witness_for_device(manifest_root_blake3, None),
+        |device| managed_card_witness_for_device(manifest_root_blake3, Some(device)),
+    )
+}
+
+fn managed_card_witness_for_device(
+    manifest_root_blake3: &str,
+    device: Option<&StorageDevice>,
+) -> String {
+    let (capacity, filesystem, reader, slot) = device.map_or_else(
+        || (String::new(), String::new(), String::new(), String::new()),
+        |device| {
+            (
+                device
+                    .details
+                    .total_bytes
+                    .map_or_else(String::new, |value| value.to_string()),
+                device.details.filesystem.clone().unwrap_or_default(),
+                device
+                    .details
+                    .reader_fingerprint
+                    .clone()
+                    .unwrap_or_default(),
+                device.details.reader_slot.clone().unwrap_or_default(),
+            )
+        },
+    );
+    blake3::hash(
+        format!(
+            "mit2-managed-witness\0{manifest_root_blake3}\0{capacity}\0{filesystem}\0{reader}\0{slot}"
+        )
+        .as_bytes(),
+    )
+    .to_hex()
+    .to_string()
+}
+
+fn managed_card_matches_sealed_receipt(
+    store: &LocalStore,
+    run_id: &str,
+    device: &StorageDevice,
+) -> bool {
+    let Some(root) = device.details.mount_locations.first().map(PathBuf::from) else {
+        return false;
+    };
+    let Ok(Some(marker)) = crate::storage_marker::read_record(&root) else {
+        return false;
+    };
+    let Ok(Some(profile)) = store.marker_ingest_profile(&marker.token) else {
+        return false;
+    };
+    if profile.marker_token != marker.token {
+        return false;
+    }
+    let Ok(Some(manifest_root)) = store.receipt_manifest_root(run_id) else {
+        return false;
+    };
+    let expected = managed_card_witness_for_device(&manifest_root, Some(device));
+    marker.content_fingerprint.as_deref() == Some(expected.as_str())
+        // Older MIT2 records stored the sealed root directly. Keep this
+        // bounded migration path; the next verified ingest upgrades it.
+        || marker.content_fingerprint.as_deref() == Some(manifest_root.as_str())
+}
+
+/// Before format, a managed card is bound by its registered marker witness.
+/// Format removes that marker, so post-format validation retains the provider's
+/// exact volume/capacity check and requires the same calibrated reader slot.
+/// Hardware-immutable identity remains the stronger path whenever available.
+fn same_managed_format_target(
+    before: &StorageDevice,
+    after: &StorageDevice,
+    validated_root: &std::path::Path,
+    expected_capacity: u64,
+) -> bool {
+    after.state == DeviceState::Available
+        && after.details.total_bytes == Some(expected_capacity)
+        && after.details.mount_locations.len() == 1
+        && PathBuf::from(&after.details.mount_locations[0]) == validated_root
+        && ((before.identity.confidence == IdentityConfidence::HardwareImmutable
+            && after.identity.confidence == IdentityConfidence::HardwareImmutable
+            && after.identity.media_key == before.identity.media_key)
+            || (before.details.reader_fingerprint.is_some()
+                && before.details.reader_fingerprint == after.details.reader_fingerprint
+                && before.details.reader_slot.is_some()
+                && before.details.reader_slot == after.details.reader_slot))
+}
+
 /// Runs only after the receipt transaction has sealed and only for a card the
 /// operator explicitly registered with auto-format enabled. Every native
 /// target decision is freshly observed here; the webview supplies no target.
 async fn run_auto_format_after_verified_ingest(
     result: &VerifiedIngestResult,
     source_root: &std::path::Path,
+    managed_witness: Option<&str>,
     auto_ingest_triggered: bool,
     state: &AppState,
 ) -> AutoFormatStatus {
     let result = result.clone();
     let source_root = source_root.to_path_buf();
+    let managed_witness = managed_witness.map(str::to_owned);
     let store = Arc::clone(&state.store);
     let connection_generations = Arc::clone(&state.connection_generations);
     let active_ingests = Arc::clone(&state.active_ingests);
@@ -2068,6 +2746,7 @@ async fn run_auto_format_after_verified_ingest(
         maybe_auto_format_after_verified_ingest(
             &result,
             &source_root,
+            managed_witness.as_deref(),
             auto_ingest_triggered,
             store.as_ref(),
             connection_generations.as_ref(),
@@ -2084,18 +2763,27 @@ async fn run_auto_format_after_verified_ingest(
 fn maybe_auto_format_after_verified_ingest(
     result: &VerifiedIngestResult,
     source_root: &std::path::Path,
+    managed_witness: Option<&str>,
     auto_ingest_triggered: bool,
     store: &Mutex<LocalStore>,
     connection_generations: &Mutex<ConnectionGenerationTracker>,
     active_ingests: &Mutex<HashMap<String, ActiveIngest>>,
 ) -> AutoFormatStatus {
+    macro_rules! skipped {
+        ($reason:literal) => {{
+            if let Ok(mut store) = store.lock() {
+                let _ = store.record_ingest_note(&result.operation_id, $reason);
+            }
+            return AutoFormatStatus::Skipped;
+        }};
+    }
     if !auto_ingest_triggered {
         return AutoFormatStatus::NotConfigured;
     }
     // Formatting an already-empty registered card achieves nothing and would
     // otherwise repeat on every mount after the first successful format.
     if result.copied_files == 0 {
-        return AutoFormatStatus::Skipped;
+        skipped!("managed auto-format skipped: verified source contained no files");
     }
     let conflicting_ingest = active_ingests
         .lock()
@@ -2107,7 +2795,7 @@ fn maybe_auto_format_after_verified_ingest(
         })
         .unwrap_or(true);
     if conflicting_ingest {
-        return AutoFormatStatus::Skipped;
+        skipped!("managed auto-format skipped: another source ingest is active");
     }
     let receipt_is_current = store.lock().ok().and_then(|store| {
         store
@@ -2119,12 +2807,13 @@ fn maybe_auto_format_after_verified_ingest(
             .ok()
     }) == Some(true);
     if !receipt_is_current {
-        return AutoFormatStatus::Skipped;
+        skipped!("managed auto-format skipped: sealed receipt no longer matches this mount");
     }
-    let marker = match crate::storage_marker::read_marker(source_root) {
-        Ok(Some(marker)) => marker,
+    let marker_record = match crate::storage_marker::read_record(source_root) {
+        Ok(Some(record)) => record,
         _ => return AutoFormatStatus::NotConfigured,
     };
+    let marker = marker_record.token;
     let profile = match store
         .lock()
         .ok()
@@ -2137,6 +2826,9 @@ fn maybe_auto_format_after_verified_ingest(
     // The receipt contains no raw source identity because that information is
     // deliberately native-only. Re-resolve by the mounted root and require a
     // single immutable device that still contains the same registered marker.
+    let managed_witness_matches = managed_witness
+        .zip(marker_record.content_fingerprint.as_deref())
+        .is_some_and(|(expected, observed)| expected == observed);
     let matching = snapshot
         .devices
         .iter()
@@ -2144,7 +2836,8 @@ fn maybe_auto_format_after_verified_ingest(
             device.state == DeviceState::Available
                 && device.identity.media_key == result.source_medium_key
                 && device.connection_generation == result.source_generation
-                && device.identity.confidence == IdentityConfidence::HardwareImmutable
+                && (device.identity.confidence == IdentityConfidence::HardwareImmutable
+                    || managed_witness_matches)
                 && device.details.mount_locations.len() == 1
                 && device.details.mount_locations[0] == source_root.to_string_lossy()
                 && crate::storage_marker::read_marker(std::path::Path::new(
@@ -2157,13 +2850,15 @@ fn maybe_auto_format_after_verified_ingest(
         })
         .collect::<Vec<_>>();
     let Some(device) = (matching.len() == 1).then(|| matching[0]) else {
-        return AutoFormatStatus::Skipped;
+        skipped!("managed auto-format skipped: current mount, generation, marker, or witness did not resolve uniquely");
     };
     let Some(format_profile) = recommended_profile(device.details.total_bytes) else {
-        return AutoFormatStatus::Skipped;
+        skipped!(
+            "managed auto-format skipped: no allowlisted profile matches the current capacity"
+        );
     };
     let Some(capacity) = device.details.total_bytes else {
-        return AutoFormatStatus::Skipped;
+        skipped!("managed auto-format skipped: current capacity is unavailable");
     };
     let expected = crate::format_provider::ExpectedFormatTarget {
         medium_key: device.identity.media_key.clone(),
@@ -2178,17 +2873,52 @@ fn maybe_auto_format_after_verified_ingest(
         // formatter into a failed ingest. The card remains intact and the UI
         // distinguishes this from a failed destructive operation.
         Err(crate::format_provider::FormatProviderError::UnsupportedPlatform) => {
-            return AutoFormatStatus::Skipped
+            skipped!("managed auto-format skipped: no native format provider is installed");
         }
         Err(_) => return AutoFormatStatus::Failed,
     };
-    if provider.quick_format(&target, &format_profile).is_err() {
+    if let Err(error) = provider.quick_format(&target, &format_profile) {
+        let reason = match error {
+            crate::format_provider::FormatProviderError::Busy => {
+                "managed auto-format failed: Windows reported the card is busy".into()
+            }
+            crate::format_provider::FormatProviderError::WriteProtected => {
+                "managed auto-format failed: Windows reported write protection".into()
+            }
+            crate::format_provider::FormatProviderError::TargetChanged => {
+                "managed auto-format failed: native target changed before formatting".into()
+            }
+            crate::format_provider::FormatProviderError::FormatFailedWithCode(code) => {
+                format!("managed auto-format failed: native quick-format returned code {code}")
+            }
+            crate::format_provider::FormatProviderError::FormatInputFailed => {
+                "managed auto-format failed: Windows rejected the documented format input".into()
+            }
+            crate::format_provider::FormatProviderError::FormatOutputMissing => {
+                "managed auto-format failed: Windows returned no format result".into()
+            }
+            crate::format_provider::FormatProviderError::FormatResultUnreadable => {
+                "managed auto-format failed: Windows returned an unreadable format result".into()
+            }
+            _ => "managed auto-format failed: native quick-format provider rejected the operation"
+                .into(),
+        };
+        if let Ok(mut store) = store.lock() {
+            let _ = store.record_ingest_note(&result.operation_id, &reason);
+        }
         return AutoFormatStatus::Failed;
     }
     let validated = match provider.wait_for_validated_mount(&expected, &format_profile) {
         Ok(validated) => validated,
         Err(_) => return AutoFormatStatus::Failed,
     };
+    if crate::storage_marker::read_record(&validated.root)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return AutoFormatStatus::Failed;
+    }
     if sentinel_round_trip(&validated.root).is_err() {
         return AutoFormatStatus::Failed;
     }
@@ -2209,6 +2939,18 @@ fn maybe_auto_format_after_verified_ingest(
         AutoFormatStatus::Completed
     } else {
         AutoFormatStatus::Failed
+    }
+}
+
+fn record_auto_format_outcome(state: &AppState, run_id: &str, outcome: &AutoFormatStatus) {
+    let reason = match outcome {
+        AutoFormatStatus::Completed => "managed auto-format completed and receipt recorded",
+        AutoFormatStatus::Failed => "managed auto-format reached the native provider but failed",
+        AutoFormatStatus::Skipped => "managed auto-format skipped by a native safety gate",
+        AutoFormatStatus::NotConfigured => "managed auto-format was not configured for this ingest",
+    };
+    if let Ok(mut store) = state.store.lock() {
+        let _ = store.record_ingest_note(run_id, reason);
     }
 }
 
@@ -2481,17 +3223,14 @@ fn snapshot_from_volumes(
                 },
                 connection_generation: 0,
                 identity: DeviceIdentity {
-                    // A valid app marker survives a mount-name change, but it is
-                    // ordinary mutable filesystem content. Keep confidence
-                    // unresolved so it cannot authorize recall or formatting.
+                    // A managed-card marker selects an opt-in profile, but it
+                    // must never replace the native/session operation key.
+                    // Creating or upgrading the marker during a verified
+                    // ingest would otherwise change the key mid-operation and
+                    // make the exact receipt/current-mount gates disagree.
                     media_key: sd_cid_candidate
                         .as_ref()
                         .map(|cid| derive_key(IdentityScope::Medium, cid))
-                        .or_else(|| {
-                            marker_candidate
-                                .as_ref()
-                                .map(|marker| derive_key(IdentityScope::Filesystem, marker))
-                        })
                         .unwrap_or(volume.session_key),
                     confidence: if sd_cid_candidate.is_some() {
                         IdentityConfidence::HardwareImmutable
@@ -2629,6 +3368,24 @@ pub fn run() {
             });
             Ok(())
         })
+        .on_window_event(|window, event| {
+            let state = window.state::<AppState>();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if has_active_ingests(&state.active_ingests) {
+                        api.prevent_close();
+                        let _ = window.emit("media-ingest://close-requested", ());
+                    }
+                }
+                // Desktop Tauri does not expose suspend/resume window events.
+                // Recheck on foreground focus, which is the first reliable
+                // operator-visible point after a sleep/wake cycle.
+                tauri::WindowEvent::Focused(true) => {
+                    let _ = window.emit("media-ingest://reactivated", ());
+                }
+                _ => {}
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_device_snapshot,
             get_ingest_history,
@@ -2638,8 +3395,10 @@ pub fn run() {
             register_card_marker,
             get_auto_ingest_profile,
             get_format_eligibility,
+            safe_eject,
             preview_verified_ingest,
             request_format_authorization,
+            execute_format_authorization,
             watch_device_snapshots,
             calibrate_reader_slot,
             start_verified_ingest,
@@ -2659,6 +3418,47 @@ mod tests {
         let provider = DeterministicDeviceSnapshotProvider;
         assert_eq!(provider.snapshot(), provider.snapshot());
         assert!(provider.snapshot().devices.is_empty());
+    }
+
+    #[test]
+    fn safe_eject_allows_a_current_marker_backed_card_to_reach_native_resolution() {
+        let database =
+            std::env::temp_dir().join(format!("safe-eject-{}.sqlite3", uuid::Uuid::new_v4()));
+        let state = AppState {
+            store: Arc::new(Mutex::new(LocalStore::open(&database).expect("store"))),
+            active_ingests: Arc::new(Mutex::new(HashMap::new())),
+            destination_leases: Arc::new(DestinationLeaseRegistry::default()),
+            format_authorizations: Arc::new(Mutex::new(HashMap::new())),
+            connection_generations: Arc::new(Mutex::new(ConnectionGenerationTracker::default())),
+        };
+        let request = SafeEjectRequest {
+            run_id: "completed-run".into(),
+            source_medium_key: "filesystem:mutable".into(),
+            source_generation: 1,
+            source_identity_confidence: IdentityConfidence::Unresolved,
+        };
+        assert_eq!(
+            safe_eject_mount(&request, &state),
+            Err("No sealed completed receipt matches the current source card")
+        );
+        drop(state);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[test]
+    fn close_gate_recognizes_an_active_ingest() {
+        let active = Mutex::new(HashMap::new());
+        assert!(!has_active_ingests(&active));
+        active.lock().expect("active ingest store").insert(
+            "run".into(),
+            ActiveIngest {
+                cancellation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                source_medium_key: "hardware:fixture".into(),
+                source_root: "F:\\".into(),
+                source_seen_in_snapshot: true,
+            },
+        );
+        assert!(has_active_ingests(&active));
     }
 
     #[test]
@@ -2682,6 +3482,7 @@ mod tests {
             maybe_auto_format_after_verified_ingest(
                 &result,
                 std::path::Path::new("not-used-for-manual-ingest"),
+                None,
                 false,
                 &store,
                 &generations,
@@ -2697,6 +3498,7 @@ mod tests {
             maybe_auto_format_after_verified_ingest(
                 &empty,
                 std::path::Path::new("not-used-for-empty-ingest"),
+                None,
                 true,
                 &store,
                 &generations,
@@ -2718,6 +3520,7 @@ mod tests {
             maybe_auto_format_after_verified_ingest(
                 &result,
                 std::path::Path::new("not-used-for-competing-ingest"),
+                None,
                 true,
                 &store,
                 &generations,
@@ -2727,6 +3530,31 @@ mod tests {
         );
         drop(store);
         std::fs::remove_file(database).expect("cleanup store");
+    }
+
+    #[test]
+    fn empty_auto_ingest_is_skipped_before_it_can_persist_a_failed_run() {
+        let request = VerifiedIngestRequest {
+            operation_id: None,
+            source_root: "M:\\".into(),
+            destination_root: "F:\\ingest".into(),
+            source_medium_key: "v1:managed-card".into(),
+            source_identity_confidence: IdentityConfidence::Unresolved,
+            source_generation: 22,
+            max_workers: 2,
+            sort_mode: IngestSortMode::CameraDay,
+            interval_minutes: None,
+            auto_ingest_triggered: true,
+        };
+        assert!(skips_empty_auto_ingest(&request, 0));
+        assert!(!skips_empty_auto_ingest(&request, 1));
+        assert!(!skips_empty_auto_ingest(
+            &VerifiedIngestRequest {
+                auto_ingest_triggered: false,
+                ..request
+            },
+            0
+        ));
     }
 
     #[test]
@@ -2877,6 +3705,69 @@ mod tests {
         assign_connection_generations(&mut reinserted, &mut tracker);
         assert_eq!(reinserted.devices[0].connection_generation, 2);
         assert!(current_source_for_ingest_request(&reinserted, &request).is_none());
+
+        let recovery = RecoverableIngestRun {
+            run_id: "interrupted".into(),
+            source_identity_key: "v1:exact-card".into(),
+            source_generation: 1,
+            source_root: "F:\\".into(),
+            destination_root: "D:\\Ingest".into(),
+            auto_ingest_triggered: false,
+        };
+        assert!(current_source_for_recovery(&first, &recovery).is_some());
+        assert!(current_source_for_recovery(&reinserted, &recovery).is_some());
+
+        let mut unresolved_same_mount = first.clone();
+        unresolved_same_mount.devices[0].identity.confidence = IdentityConfidence::Unresolved;
+        assert!(current_source_for_recovery(&unresolved_same_mount, &recovery).is_some());
+
+        let mut unresolved_reinsert = unresolved_same_mount;
+        unresolved_reinsert.devices[0].connection_generation = 2;
+        assert!(current_source_for_recovery(&unresolved_reinsert, &recovery).is_none());
+    }
+
+    #[test]
+    fn persisted_generation_preserves_a_mounted_insertion_across_restart() {
+        let device = || StorageDevice {
+            state: DeviceState::Available,
+            connection_generation: 0,
+            identity: DeviceIdentity {
+                media_key: "marker:registered-card".into(),
+                confidence: IdentityConfidence::Unresolved,
+                evidence: Vec::new(),
+            },
+            details: StorageDeviceDetails {
+                display_name: "card".into(),
+                filesystem: Some("exFAT".into()),
+                total_bytes: Some(1),
+                available_bytes: Some(1),
+                mount_locations: vec!["F:\\".into()],
+                reader_fingerprint: None,
+                reader_family: None,
+                reader_slot: None,
+            },
+        };
+        let mut tracker = ConnectionGenerationTracker::default();
+        seed_connection_generations(&mut tracker, [("marker:registered-card".into(), 7)]);
+
+        let mut after_restart = DeviceSnapshot {
+            sequence: 1,
+            devices: vec![device()],
+        };
+        assign_connection_generations(&mut after_restart, &mut tracker);
+        assert_eq!(after_restart.devices[0].connection_generation, 7);
+
+        let mut removed = DeviceSnapshot {
+            sequence: 2,
+            devices: Vec::new(),
+        };
+        assign_connection_generations(&mut removed, &mut tracker);
+        let mut reinserted = DeviceSnapshot {
+            sequence: 3,
+            devices: vec![device()],
+        };
+        assign_connection_generations(&mut reinserted, &mut tracker);
+        assert_eq!(reinserted.devices[0].connection_generation, 8);
     }
 
     #[test]
@@ -2893,7 +3784,7 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_volume_evidence_does_not_upgrade_the_medium_confidence() {
+    fn filesystem_marker_evidence_does_not_replace_the_native_operation_key() {
         let mut volume = device_discovery::volume_from_parts(
             "F:\\".into(),
             "CAMERA_CARD".into(),
@@ -2929,7 +3820,7 @@ mod tests {
             .expect("marker evidence");
         assert!(!marker.immutable);
         assert!(!marker.fingerprint.contains("MIT1"));
-        assert_eq!(
+        assert_ne!(
             snapshot.devices[0].identity.media_key,
             snapshot.devices[1].identity.media_key
         );
@@ -3369,6 +4260,91 @@ mod tests {
             (result.summary.copied_files, result.summary.copied_bytes),
             (3, 1_310_762)
         );
+    }
+
+    #[test]
+    #[ignore = "requires both connected sacrificial cards and F:\\media-ingest-hardware-tests"]
+    fn hardware_two_card_concurrent_verified_ingest_probe() {
+        let root = PathBuf::from(r"F:\media-ingest-hardware-tests")
+            .join(format!("two-card-concurrent-{}", uuid::Uuid::new_v4()));
+        let sd_destination = root.join("sd");
+        let microsd_destination = root.join("microsd");
+        std::fs::create_dir_all(&sd_destination).expect("SD destination");
+        std::fs::create_dir_all(&microsd_destination).expect("microSD destination");
+
+        let sd = std::thread::spawn(move || {
+            let request = VerifiedIngestRequest {
+                operation_id: Some("10000000-0000-4000-8000-000000000003".into()),
+                source_root: r"D:\DCIM\100DUMMY".into(),
+                destination_root: sd_destination.to_string_lossy().into(),
+                source_medium_key: "hardware-sd-concurrent-probe".into(),
+                source_identity_confidence: IdentityConfidence::Unresolved,
+                source_generation: 1,
+                max_workers: 2,
+                sort_mode: IngestSortMode::OriginalTree,
+                interval_minutes: None,
+                auto_ingest_triggered: false,
+            };
+            let prepared = prepare_verified_ingest(
+                request.clone(),
+                request.operation_id.clone().expect("operation id"),
+            )
+            .expect("SD plan");
+            let result = execute_prepared_ingest(
+                prepared,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                None,
+            )
+            .expect("SD verified ingest");
+            assert_eq!(
+                (result.summary.copied_files, result.summary.copied_bytes),
+                (3, 1_310_762)
+            );
+            result
+        });
+        let microsd = std::thread::spawn(move || {
+            let request = VerifiedIngestRequest {
+                operation_id: Some("10000000-0000-4000-8000-000000000004".into()),
+                source_root: r"M:\DCIM\100CERT".into(),
+                destination_root: microsd_destination.to_string_lossy().into(),
+                source_medium_key: "hardware-microsd-concurrent-probe".into(),
+                source_identity_confidence: IdentityConfidence::Unresolved,
+                source_generation: 1,
+                max_workers: 2,
+                sort_mode: IngestSortMode::OriginalTree,
+                interval_minutes: None,
+                auto_ingest_triggered: false,
+            };
+            let prepared = prepare_verified_ingest(
+                request.clone(),
+                request.operation_id.clone().expect("operation id"),
+            )
+            .expect("microSD plan");
+            let result = execute_prepared_ingest(
+                prepared,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                None,
+            )
+            .expect("microSD verified ingest");
+            assert_eq!(
+                (result.summary.copied_files, result.summary.copied_bytes),
+                (3, 3_670_016)
+            );
+            result
+        });
+
+        let sd = sd.join().expect("SD worker");
+        let microsd = microsd.join().expect("microSD worker");
+        assert!(root
+            .join("sd")
+            .join(".media-ingest-receipts")
+            .join(sd.summary.receipt_name)
+            .exists());
+        assert!(root
+            .join("microsd")
+            .join(".media-ingest-receipts")
+            .join(microsd.summary.receipt_name)
+            .exists());
     }
 
     #[test]

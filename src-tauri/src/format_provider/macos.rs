@@ -36,6 +36,7 @@ impl PlatformFormatProvider for MacOsDiskutilProvider {
         }
         Ok(ResolvedFormatTarget {
             provider_key: info.identifier,
+            current_mount_root: expected.current_mount_root.clone(),
             medium_key: expected.medium_key.clone(),
             connection_generation: expected.connection_generation,
             capacity_bytes: info.capacity_bytes,

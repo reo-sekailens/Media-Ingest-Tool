@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-safe-eject"
+description = "Enables the safe_eject command without any pre-configured scope."
+commands.allow = ["safe_eject"]
+
+[[permission]]
+identifier = "deny-safe-eject"
+description = "Denies the safe_eject command without any pre-configured scope."
+commands.deny = ["safe_eject"]

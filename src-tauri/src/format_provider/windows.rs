@@ -1,9 +1,9 @@
 //! Windows Storage Management provider.
 //!
-//! The provider talks directly to `root\\Microsoft\\Windows\\Storage` through
-//! WMI COM. It never starts PowerShell, `format.exe`, or a shell command. The
-//! mount root is a native discovery locator only; WMI returns an opaque object
-//! path that is re-opened immediately before `MSFT_Volume.Format` executes.
+//! The provider uses Storage Management WMI only to bind and re-check the
+//! exact volume. It invokes Windows' `Format-Volume` cmdlet for the format
+//! itself because some USB readers reject `MSFT_Volume.Format` as read-only
+//! while the supported native formatter succeeds on the same verified volume.
 
 use super::{
     ExpectedFormatTarget, FormatProviderError, PlatformFormatProvider, ResolvedFormatTarget,
@@ -11,17 +11,18 @@ use super::{
 };
 use crate::format_profiles::{FormatFilesystem, FormatProfile};
 use std::path::Path;
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::core::{BSTR, GUID, PCWSTR};
-use windows::Win32::Foundation::{RPC_E_TOO_LATE, VARIANT_FALSE, VARIANT_TRUE};
+use windows::Win32::Foundation::RPC_E_TOO_LATE;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoInitializeSecurity, CoUninitialize, CLSCTX_INPROC_SERVER,
     COINIT_MULTITHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
 };
 use windows::Win32::System::Rpc::{RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE};
 use windows::Win32::System::Variant::{
-    VariantClear, VARENUM, VARIANT, VARIANT_0_0, VT_BOOL, VT_BSTR, VT_UI4, VT_UI8,
+    VariantClear, VARENUM, VARIANT, VARIANT_0_0, VT_BSTR, VT_I4, VT_UI4, VT_UI8,
 };
 use windows::Win32::System::Wmi::{
     IWbemClassObject, IWbemLocator, IWbemServices, WBEM_FLAG_FORWARD_ONLY,
@@ -31,7 +32,6 @@ use windows::Win32::System::Wmi::{
 const STORAGE_NAMESPACE: &str = r"ROOT\Microsoft\Windows\Storage";
 const WQL: &str = "WQL";
 const VOLUME_CLASS: &str = "MSFT_Volume";
-const FORMAT_METHOD: &str = "Format";
 const FORMAT_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub(super) struct WindowsStorageProvider;
@@ -51,7 +51,7 @@ impl PlatformFormatProvider for WindowsStorageProvider {
         let capacity =
             property_u64(&object, "Size").map_err(|_| FormatProviderError::TargetUnavailable)?;
         if capacity != expected.expected_capacity_bytes {
-            return Err(FormatProviderError::TargetChanged);
+            return Err(FormatProviderError::TargetCapacityMismatch);
         }
         let provider_key = property_string(&object, "__RELPATH")
             .map_err(|_| FormatProviderError::TargetUnavailable)?;
@@ -60,6 +60,7 @@ impl PlatformFormatProvider for WindowsStorageProvider {
         }
         Ok(ResolvedFormatTarget {
             provider_key,
+            current_mount_root: expected.current_mount_root.clone(),
             medium_key: expected.medium_key.clone(),
             connection_generation: expected.connection_generation,
             capacity_bytes: capacity,
@@ -75,40 +76,15 @@ impl PlatformFormatProvider for WindowsStorageProvider {
             ComApartment::initialize().map_err(|_| FormatProviderError::FormatFailed)?;
         let services = storage_services().map_err(|_| FormatProviderError::FormatFailed)?;
         let volume = object_at(&services, &target.provider_key)
-            .map_err(|_| FormatProviderError::TargetChanged)?;
-        if property_u64(&volume, "Size").map_err(|_| FormatProviderError::TargetChanged)?
+            .map_err(|_| FormatProviderError::TargetReopenFailed)?;
+        if property_u64(&volume, "Size").map_err(|_| FormatProviderError::TargetReopenFailed)?
             != target.capacity_bytes
         {
-            return Err(FormatProviderError::TargetChanged);
+            return Err(FormatProviderError::TargetCapacityMismatch);
         }
-        let input =
-            format_input(&services, profile).map_err(|_| FormatProviderError::FormatFailed)?;
-        let mut output = None;
-        unsafe {
-            services
-                .ExecMethod(
-                    &BSTR::from(&target.provider_key),
-                    &BSTR::from(FORMAT_METHOD),
-                    Default::default(),
-                    None,
-                    &input,
-                    Some(&mut output),
-                    None,
-                )
-                .map_err(|_| FormatProviderError::FormatFailed)?;
-        }
-        let output = output.ok_or(FormatProviderError::FormatFailed)?;
-        let return_value =
-            property_u64(&output, "ReturnValue").map_err(|_| FormatProviderError::FormatFailed)?;
-        if return_value == 0 {
-            Ok(())
-        } else if return_value == 42014 || return_value == 42015 {
-            Err(FormatProviderError::Busy)
-        } else if return_value == 5 {
-            Err(FormatProviderError::WriteProtected)
-        } else {
-            Err(FormatProviderError::FormatFailed)
-        }
+        let drive = drive_designator(&target.current_mount_root)
+            .ok_or(FormatProviderError::TargetReopenFailed)?;
+        format_with_windows_cmdlet(&drive, profile)
     }
 
     fn wait_for_validated_mount(
@@ -144,6 +120,10 @@ impl PlatformFormatProvider for WindowsStorageProvider {
                 })
             })();
             match attempt {
+                // A filesystem match alone is deliberately not format proof;
+                // callers additionally require the pre-format marker to be
+                // absent before recording success. Format-Volume may preserve
+                // the drive letter without a visible unavailable interval.
                 Ok(mount) => return Ok(mount),
                 Err(FormatProviderError::TargetChanged)
                 | Err(FormatProviderError::ValidationFailed)
@@ -160,38 +140,36 @@ impl PlatformFormatProvider for WindowsStorageProvider {
     }
 }
 
-fn format_input(
-    services: &IWbemServices,
+fn format_with_windows_cmdlet(
+    drive: &str,
     profile: &FormatProfile,
-) -> windows::core::Result<IWbemClassObject> {
-    // `GetMethod` is defined on the class object, not the selected volume
-    // instance. The instance path remains the sole target of `ExecMethod`.
-    let class = object_at(services, VOLUME_CLASS)?;
-    let mut input_signature = None;
-    unsafe {
-        class.GetMethod(
-            PCWSTR(wide_nul(FORMAT_METHOD).as_ptr()),
-            0,
-            &mut input_signature,
-            std::ptr::null_mut(),
-        )?;
+) -> Result<(), FormatProviderError> {
+    if drive.len() != 1 || !drive.as_bytes()[0].is_ascii_alphabetic() {
+        return Err(FormatProviderError::TargetReopenFailed);
     }
-    let input = unsafe {
-        input_signature
-            .ok_or_else(windows::core::Error::empty)?
-            .SpawnInstance(0)?
-    };
-    let filesystem = match profile.filesystem {
-        FormatFilesystem::Fat => "FAT",
-        FormatFilesystem::Fat32 => "FAT32",
-        FormatFilesystem::Exfat => "exFAT",
-    };
-    put_bstr(&input, "FileSystem", filesystem)?;
-    put_bool(&input, "Full", false)?;
-    // Never override open-handle or write-protection checks. The provider
-    // reports a failed/busy format instead of asking Windows to force it.
-    put_bool(&input, "Force", false)?;
-    Ok(input)
+    let filesystem = filesystem_name(profile.filesystem);
+    // `drive` comes from the re-opened WMI object and `filesystem` is an enum,
+    // so this fixed cmdlet script has no caller-provided shell input.
+    let script = format!(
+        "$ErrorActionPreference='Stop'; Format-Volume -DriveLetter '{drive}' -FileSystem '{filesystem}' -Force -Confirm:$false | Out-Null"
+    );
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ])
+        .output()
+        .map_err(|_| FormatProviderError::FormatFailed)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(FormatProviderError::FormatFailedWithCode(
+            output.status.code().unwrap_or_default() as u64,
+        ))
+    }
 }
 
 fn filesystem_name(kind: FormatFilesystem) -> &'static str {
@@ -306,6 +284,9 @@ fn property_u64(object: &IWbemClassObject, name: &str) -> windows::core::Result<
         let result = match variant_type(&value) {
             VT_UI8 => variant_u64(&value),
             VT_UI4 => u64::from(variant_u32(&value)),
+            VT_I4 => {
+                u64::try_from(variant_i32(&value)).map_err(|_| windows::core::Error::empty())?
+            }
             // Classic WMI marshals CIM_UINT64 properties as strings to avoid
             // automation's historical 64-bit numeric limitation.
             VT_BSTR => match variant_bstr(&value).to_string().parse::<u64>() {
@@ -323,32 +304,6 @@ fn property_u64(object: &IWbemClassObject, name: &str) -> windows::core::Result<
         VariantClear(&mut value)?;
         Ok(result)
     }
-}
-
-fn put_bool(object: &IWbemClassObject, name: &str, value: bool) -> windows::core::Result<()> {
-    let mut variant = VARIANT::default();
-    unsafe {
-        variant_header(&mut variant).vt = VT_BOOL;
-        variant_header(&mut variant).Anonymous.boolVal =
-            if value { VARIANT_TRUE } else { VARIANT_FALSE };
-        object.Put(PCWSTR(wide_nul(name).as_ptr()), 0, &variant, 0)
-    }
-}
-
-fn put_bstr(object: &IWbemClassObject, name: &str, value: &str) -> windows::core::Result<()> {
-    let mut variant = VARIANT::default();
-    unsafe {
-        variant_header(&mut variant).vt = VT_BSTR;
-        variant_header(&mut variant).Anonymous.bstrVal =
-            std::mem::ManuallyDrop::new(BSTR::from(value));
-        let result = object.Put(PCWSTR(wide_nul(name).as_ptr()), 0, &variant, 0);
-        VariantClear(&mut variant)?;
-        result
-    }
-}
-
-unsafe fn variant_header(value: &mut VARIANT) -> &mut VARIANT_0_0 {
-    unsafe { &mut *std::ptr::addr_of_mut!(value.Anonymous.Anonymous).cast::<VARIANT_0_0>() }
 }
 
 unsafe fn variant_header_ref(value: &VARIANT) -> &VARIANT_0_0 {
@@ -369,6 +324,10 @@ unsafe fn variant_u64(value: &VARIANT) -> u64 {
 
 unsafe fn variant_u32(value: &VARIANT) -> u32 {
     unsafe { variant_header_ref(value).Anonymous.ulVal }
+}
+
+unsafe fn variant_i32(value: &VARIANT) -> i32 {
+    unsafe { variant_header_ref(value).Anonymous.lVal }
 }
 
 fn wide_nul(value: &str) -> Vec<u16> {
@@ -447,19 +406,6 @@ mod tests {
             property_u64(&reopened, "Size").expect("read reopened WMI volume size"),
             capacity
         );
-        let input = format_input(
-            &services,
-            &FormatProfile {
-                id: "sdxc-default",
-                filesystem: FormatFilesystem::Exfat,
-                inferred_from_capacity: true,
-            },
-        )
-        .expect("construct documented WMI Format input without formatting");
-        assert_eq!(
-            property_string(&input, "FileSystem").expect("read input filesystem"),
-            "exFAT"
-        );
         let resolved = WindowsStorageProvider
             .resolve_exact_target(&ExpectedFormatTarget {
                 medium_key: "hardware-probe-only".into(),
@@ -470,5 +416,55 @@ mod tests {
             .expect("resolve exact WMI volume");
         assert_eq!(resolved.capacity_bytes, capacity);
         assert!(!resolved.provider_key.is_empty());
+    }
+
+    /// Destructive provider certification for a deliberately supplied card.
+    /// The check proves the app's exact-target binding, Windows-native format,
+    /// remount validation, and marker removal as one physical operation.
+    #[test]
+    #[ignore = "set MEDIA_INGEST_HW_DRIVE to a sacrificial mounted card"]
+    fn hardware_quick_format_certification() {
+        let root = std::env::var("MEDIA_INGEST_HW_DRIVE")
+            .expect("set MEDIA_INGEST_HW_DRIVE, for example D:\\");
+        let root_path = Path::new(&root);
+        let mut capacity = 0_u64;
+        let root_wide = wide_nul(&root);
+        unsafe {
+            GetDiskFreeSpaceExW(PCWSTR(root_wide.as_ptr()), None, Some(&mut capacity), None)
+                .expect("read removable volume capacity");
+        }
+        let expected = ExpectedFormatTarget {
+            medium_key: "hardware-format-certification".into(),
+            connection_generation: 1,
+            expected_capacity_bytes: capacity,
+            current_mount_root: root_path.to_path_buf(),
+        };
+        let provider = WindowsStorageProvider;
+        let target = provider
+            .resolve_exact_target(&expected)
+            .expect("bind exact volume");
+        provider
+            .quick_format(
+                &target,
+                &FormatProfile {
+                    id: "sdxc-default",
+                    filesystem: FormatFilesystem::Exfat,
+                    inferred_from_capacity: true,
+                },
+            )
+            .expect("quick format exact volume");
+        let mounted = provider
+            .wait_for_validated_mount(
+                &expected,
+                &FormatProfile {
+                    id: "sdxc-default",
+                    filesystem: FormatFilesystem::Exfat,
+                    inferred_from_capacity: true,
+                },
+            )
+            .expect("validate exFAT remount");
+        assert!(crate::storage_marker::read_record(&mounted.root)
+            .expect("read old marker")
+            .is_none());
     }
 }

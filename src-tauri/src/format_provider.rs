@@ -20,6 +20,9 @@ pub struct ExpectedFormatTarget {
 pub struct ResolvedFormatTarget {
     /// Native-only opaque binding owned by a platform provider.
     pub provider_key: String,
+    /// Native-only mount locator carried from the immediately preceding exact
+    /// platform resolution. It is revalidated before any formatter runs.
+    pub current_mount_root: PathBuf,
     pub medium_key: String,
     pub connection_generation: u64,
     pub capacity_bytes: u64,
@@ -37,10 +40,16 @@ pub enum FormatProviderError {
     UnsupportedPlatform,
     TargetUnavailable,
     TargetChanged,
+    TargetReopenFailed,
+    TargetCapacityMismatch,
     NotRemovable,
     WriteProtected,
     Busy,
+    FormatInputFailed,
+    FormatOutputMissing,
+    FormatResultUnreadable,
     FormatFailed,
+    FormatFailedWithCode(u64),
     RemountFailed,
     ValidationFailed,
 }

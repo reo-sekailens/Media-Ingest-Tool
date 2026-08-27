@@ -140,8 +140,14 @@ impl DeviceChangeSubscription {
         })
     }
 
-    pub fn recv(&self) -> Result<(), std::sync::mpsc::RecvError> {
-        self.events.recv()
+    /// Some multi-slot readers retain their disk interface while a card is
+    /// removed, so they do not always emit a PnP interface-removal event.
+    /// The watcher uses this bounded timeout to re-check media presence.
+    pub fn recv_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<(), std::sync::mpsc::RecvTimeoutError> {
+        self.events.recv_timeout(timeout)
     }
 }
 
@@ -276,8 +282,9 @@ mod platform {
     use windows::Win32::Storage::IscsiDisc::{IOCTL_SCSI_GET_ADDRESS, SCSI_ADDRESS};
     use windows::Win32::System::Ioctl::{
         PropertyStandardQuery, StorageDeviceIdProperty, StorageDeviceProperty,
-        IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_DEVICE_DESCRIPTOR,
-        STORAGE_DEVICE_NUMBER, STORAGE_IDENTIFIER, STORAGE_PROPERTY_QUERY,
+        IOCTL_STORAGE_CHECK_VERIFY, IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY,
+        STORAGE_DEVICE_DESCRIPTOR, STORAGE_DEVICE_NUMBER, STORAGE_IDENTIFIER,
+        STORAGE_PROPERTY_QUERY,
     };
     use windows::Win32::System::IO::DeviceIoControl;
 
@@ -295,6 +302,9 @@ mod platform {
         let mount = format!("{}:\\", char::from(b'A' + index));
         let wide = wide_nul(&mount);
         if unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) } != DRIVE_REMOVABLE {
+            return None;
+        }
+        if !mounted_medium_is_present(index) {
             return None;
         }
 
@@ -354,6 +364,54 @@ mod platform {
             .flatten();
         volume.reader_topology = topology;
         Some(volume)
+    }
+
+    /// `GetLogicalDrives` can retain an empty reader's drive letter. Verify
+    /// actual media readiness before treating that letter as a mounted card.
+    /// A reader that does not implement this optional storage IOCTL remains
+    /// discoverable; only a definitive no-media response removes it.
+    fn mounted_medium_is_present(index: u8) -> bool {
+        let device_path = format!(r"\\.\{}:", char::from(b'A' + index));
+        let wide = wide_nul(&device_path);
+        let Ok(handle) = (unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                FILE_GENERIC_READ.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+        }) else {
+            return false;
+        };
+        let result = unsafe {
+            DeviceIoControl(
+                handle,
+                IOCTL_STORAGE_CHECK_VERIFY,
+                None,
+                0,
+                None,
+                0,
+                None,
+                None,
+            )
+        };
+        let _ = unsafe { CloseHandle(handle) };
+        match result {
+            Ok(()) => true,
+            // An unsupported check-verify request does not prove the medium
+            // is absent. Subsequent normal volume queries retain their
+            // existing fail-closed unavailable state if they cannot read it.
+            Err(error)
+                if error.code().0
+                    == windows::Win32::Foundation::ERROR_INVALID_FUNCTION.0 as i32 =>
+            {
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     fn query_reader_topology(index: u8) -> Option<ReaderTopology> {

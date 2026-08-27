@@ -2,7 +2,7 @@
 
 ## Status and ownership
 
-- **Status:** in progress — a native non-destructive readiness/authorization preflight requires a sealed `completed` receipt bound to the exact source identity key and source generation, a uniquely re-observed `hardware_immutable` medium, and no active ingest. It carries a capacity-inferred allowlisted generic FAT/FAT32/exFAT profile; tokens are short-lived, native-memory-only, and single-use. No UI path, disk number, or provider arguments cross IPC. Windows has an in-process WMI `MSFT_Volume.Format` provider with opaque object-path/capacity revalidation, non-forced quick format, remount validation, marker restoration, and a local format receipt; the live sacrificial card passed only its non-destructive binding probe. macOS has a source-level fixed-argument `diskutil` provider, and Linux has a source-level direct UDisks2 D-Bus provider. Non-Windows compilation/runtime and all destructive hardware certification remain pending.
+- **Status:** in progress — manual quick format still requires a sealed receipt and `hardware_immutable` identity. Separately, an explicitly accepted managed-card auto-format path requires the same current mount/generation and sealed receipt plus an opt-in marker profile and a matching compact BLAKE3 content witness; it is deliberately copyable-risk continuity evidence, not hardware proof. A first packaged microSD run verified the source but safely skipped formatting because a zero-byte interrupted marker and mutable-marker operation-key transition broke its gates. The installed repair atomically replaces markers, repairs only zero-byte interrupted reserved markers, and retains a stable native/session operation key while using the marker only for profile lookup. The destructive provider, post-format sentinel, marker restoration, and format receipt remain unverified on hardware. Non-Windows compilation/runtime and all destructive hardware certification remain pending.
 - The native token is additionally bound to the exact completed run ID and backend-selected allowlisted profile ID. A future provider receives neither a webview path nor a free-form filesystem/profile choice; it must consume this single-use token and re-resolve the medium before any destructive call.
 - **Owner:** unassigned
 - **Risk:** critical and destructive
@@ -156,4 +156,81 @@ Maintain separate statuses for automated fixtures, VM/local OS, destructive remo
 
 ## Completion evidence
 
-Not yet available. Record exact test commands, hardware inventory/revisions, screenshots, receipts, and certification results here when implemented.
+2026-08-27 capability repair: `execute_format_authorization` was present in
+the invoke handler but missing from `build.rs`'s generated command manifest
+and the main window capability. Both now include it, so a confirmed in-app
+format request can reach the native handler. Provider/marker tests, production
+frontend build, and memory-bank validation pass. The live Tauri dev window is
+currently serving preview fixtures rather than its native removable-device
+snapshot, so no destructive button-path certification is claimed and M:
+remains unchanged.
+
+2026-08-27 live-provider repair: the frontend used the private
+`__TAURI_INTERNALS__` probe, so a real Tauri 2 dev window displayed browser
+fixtures. It now uses public `isTauri()` and rendered the live 511.8 GB M:
+card through the format confirmation. The non-destructive WMI input probe now
+passes with portable exFAT/quick/non-forced fields and `RunAsJob=false`.
+Windows still returned before its old mount transitioned, so validation now
+requires that disappearance before accepting a remount. No destructive format
+receipt exists yet.
+
+2026-08-27 repair evidence: verified removable M: exFAT storage reported `Full
+Repair Needed`. Windows PowerShell `Repair-Volume` does not support exFAT, so
+`chkdsk M: /f` was used after the app released its open handle. It repaired a
+volume-bitmap corruption and one cross-linked controlled MP4; fresh inspection
+reports exFAT `Healthy` / `OK`. This is not an application format receipt.
+
+2026-08-27 source/package readiness: the Windows WMI provider now retains the
+failure stage for rejected input, missing output, or unreadable return value;
+the marker sibling writer deletes a failed temporary record. Focused provider
+and marker Rust tests, formatting, and `cargo check` pass. The resulting NSIS
+package SHA-256 is `E96A81C4AF07023B32AABDE6D136296389956D612FFE0624BA19644616CD2996`.
+Physical destructive proof remains pending a fresh confirmed remount.
+
+2026-08-27 source/fixture evidence: focused Rust authorization tests (3), `cargo fmt --check`, `cargo check`, Prettier, strict TypeScript, and 11 UI fixtures passed. The UI fixture proves only the opaque token confirmation protocol; it is not a provider or destructive-media test. The connected SanDisk PRO-READER cards at D: and M: have unresolved identity, so the app withheld the action and no destructive format was attempted. A package run on a sacrificial card with current hardware-immutable identity is required.
+
+2026-08-27 live blocker: the confirmed M: microSD reached the Windows Storage
+Management provider, which returned `43006` for the exact exFAT quick-format
+request: the volume is read-only. Disk 5 itself remains online, healthy, and
+not read-only; no filesystem content changed. The implementation maps that
+provider-specific code to the write-protection message, waits for any returned
+storage job, and rejects an unchanged marker as format proof. Manual and
+auto-format destructive certification remain blocked until Windows accepts a
+write to this media/provider path.
+
+2026-08-27 compatible native-provider evidence: direct Windows
+`Format-Volume` quick formatting completed on the same exact M: volume using
+exFAT. The output volume is healthy and contains no old card marker or media
+folders. The application provider now uses WMI solely to bind/revalidate the
+opaque exact target, then calls the supported noninteractive `Format-Volume`
+cmdlet with a WMI-sourced single-letter drive and allowlisted filesystem. The
+live command-path proof is complete; app-owned receipt/marker restoration and
+auto-ingest destructive runs are still required.
+
+2026-08-27 completed automatic destructive run: run
+`217d7fdd-cf17-45dd-b587-d81507d2e605` on the exact managed 511.8 GB M:
+microSD verified controlled media, sealed the ingest receipt, completed the
+WMI-bound native `Format-Volume` exFAT provider, restored the marker, and
+wrote the `sdxc-default` format receipt. The manual token-confirmation command
+path is still a distinct certification gap; macOS, Linux, camera compatibility,
+and hostile-media matrix cases remain open.
+
+2026-08-27 release-binary repetition: the x64 release executable from NSIS
+bundle SHA-256 `AE3C98F30A5E1ED116496DC5DDD678E501EFAEC8F07F8370E3AA94840940A305`
+completed registered automatic run `cf3048a9-a70f-4edc-9b2d-2afc3e175009` on
+the live M: microSD. The sealed receipt, `sdxc-default` format receipt, exact
+healthy exFAT capacity, and restored marker were read back from the local
+ledger and volume. This is release-binary evidence, not a clean-machine
+installer or manual-confirmation-path certification.
+
+2026-08-27 empty-remount backstop: native automatic ingest now detects a
+zero-file plan before it persists a run and returns `skipped`; this prevents a
+post-format remount race from producing an empty failed receipt attempt. It is
+covered by focused Rust tests and does not alter manual ingestion.
+
+2026-08-27 installed-package check: NSIS installer SHA-256
+`D27925F12445C80ED9F0DD0FBE6443818C8A783338F7FD9F0C14F6F9F9B0EDA1` completed
+silently with exit code 0. Its installed executable launched successfully and
+read the retained managed marker, completed automatic format receipt, healthy
+exFAT status, and exact M: capacity. This is current-machine install evidence;
+manual confirmation and clean-machine certification remain separate.

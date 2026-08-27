@@ -30,8 +30,18 @@
 - Added operation-scoped cooperative cancellation. The React UI generates a UUID for an active native ingest and can request a safe stop; Rust maintains the active cancellation registry, prevents duplicate active IDs, and reuses the existing chunk-boundary checks. A pre-cancelled ingest test proves no receipt is written. There is still no durable progress stream, pause, reconnect-safe resume, or app-close/sleep handling.
 - Destination entry is now scoped to the selected card in the React session, so switching between two attached cards preserves their distinct choices rather than carrying one path across sources. Browser fixture interaction verified A-Cam and B-Cam paths remain isolated with no console warnings. Durable automatic recall remains prohibited until TASK002 can provide strong current-card identity.
 - Local Windows packaging evidence: `npm run tauri -- build --bundles nsis` completed and produced the unsigned x64 NSIS setup at `src-tauri/target/release/bundle/nsis/Media Ingest Tool_0.1.0_x64-setup.exe` (2,920,440 bytes, SHA-256 `E25FFB13F2A459F5A07B4868C9D3DCF2040DAED8E7C1E34052073140DF97C2F8`) and the unsigned native executable (11,448,320 bytes, SHA-256 `27DC324A67BD5CC0A4AB74800FBBBF53CABE48C64AC5B35B4FE26FF1ACAD01F9`). Authenticode status is `NotSigned`; this is a local package-build result, not a release, install, signing, or hardware-certification result.
-- The actual `start_verified_ingest` IPC command now receives a Tauri `Channel` and emits monotonically sequenced typed `queued`, `copying`, `verifying`, and `completed` stage updates. The bounded worker pool reports actual copy bytes at each 1 MiB write; the React client shows those aggregate bytes and derives copy-stage average throughput and ETA. This does not claim per-file progress, verification readback progress, durable progress checkpoints, or a guaranteed completion ETA.
+- The actual `start_verified_ingest` IPC command now receives a Tauri `Channel` and emits monotonically sequenced typed `queued`, `copying`, `verifying`, and `completed` stage updates. The bounded worker pool reports actual copy bytes at each 1 MiB write; the React client shows those aggregate bytes and derives copy-stage average throughput and ETA. This does not claim verification readback progress, durable progress checkpoints, or a guaranteed completion ETA.
 - Terminal ingest outcomes now also emit a typed `cancelled` or `failed` progress event. A worker failure carries the aggregate bytes actually written before failure, rather than leaving the UI at an earlier copying/verifying state. This is live-command/unit-test coverage only; it does not yet make cancelled partials resumable or checkpoint progress durably.
+- Copy-progress events now include a one-based ordinal for the frozen planned file and the plan's total count, with no source path leaving Rust. Manual, recovery, and auto-ingest labels show `file n of total`; a native multi-worker test checks every update has bounded metadata and a React fixture test exercises the auto-ingest channel render. Verification readback byte progress remains unimplemented.
+- The independent destination BLAKE3 readback now reports actual bytes under the typed `verifying` stage using the same frozen-plan ordinal and total. Rust coverage confirms copying and verification each sum exactly to the planned bytes, while the auto-ingest fixture renders both stages. Existing-file rehash progress during crash recovery remains a separate pending case.
+- Ran the two opt-in D: hardware ingest probes again against the controlled three-file fixture and unique folders beneath `F:\dummy\1` and `F:\dummy\2`; both passed and fresh SHA-256 checks found zero mismatches. In the current packaged native Windows app, registered the existing marker on the controlled M: card to `F:\media-ingest-auto-cert-20260826` with auto-ingest enabled and auto-format disabled. A fresh app observation completed the three-file auto-ingest with sealed receipt `9df43fc8-0179-4b02-86db-940e424fc4f9`; fresh SHA-256 comparisons found zero mismatches. This does not substitute for an observed physical remove/reinsert event.
+- After the final release-executable rebuild, another fresh packaged-app observation completed the same registered auto-ingest as run `1c6f56b8-c21a-4c63-a4bd-f018ff1debf6`. The local ledger records completed `M:\` to `F:\media-ingest-auto-cert-20260826` at generation 2; its sealed manifest plans 3 files / 3,670,016 bytes, and independent SHA-256 comparisons again found zero mismatches. This remains restart-observation evidence rather than a physical removal/reinsert test.
+- Re-ran both opt-in D: hardware probes against the current Rust core. The fresh isolated outputs `copy-1-6e479e7d-3538-4877-81af-4a927bf427ac` and `copy-2-88ee2333-0e7d-4d3b-a2c0-e5e7f2f77db2` each passed; independent SHA-256 checks matched all three files with zero mismatches. This remains core-only Windows evidence.
+- A further fresh packaged-app observation completed registered run `f25658e3-aa58-414f-9e00-fff8705e77d3` from M: to the same isolated auto-ingest destination. Its sealed manifest again contains 3 files / 3,670,016 bytes and independent SHA-256 checks found zero mismatches. It is repeat restart-observation evidence only.
+- Corrected the restart-repeat auto-ingest defect found during certification. The schema-v11 persisted run ledger marks automatic runs, profile lookup refuses a second completed automatic run for the same exact source identity plus observed generation even when the desktop app restarts, and a partial unique index atomically prevents concurrent sessions from scheduling duplicate active/completed automatic runs. A focused native-store test passes; this is source/test evidence pending a rebuilt packaged-app rerun.
+- Rebuilt the unsigned Windows NSIS package after the schema-v11 fix (installer SHA-256 `119EF3C294407C4AC72AD5D9C62CCCB4FF39C8B1C43F390EDCC42660B000CBA2`; Authenticode `NotSigned`). The package created exactly one post-migration M: auto-ingest run, `738d6152-6f13-4009-badc-aa2f280a4b7b`, then a restart created no second run (ledger remained at 5) and rendered “Registered card already auto-ingested for this mount.” The run sealed 3 files / 3,670,016 bytes and independent SHA-256 checks found zero mismatches.
+- In that same rebuilt package, selected the microSD-slot M: card, entered a fresh manual destination, and ran the ordinary “Start verified ingest” path. Run `336875d5-6b91-4f7f-8717-3ea0ab7afee6` records manual (`auto_ingest_triggered = 0`) M: → `F:\media-ingest-manual-v11-cert-20260826` completion. Its receipt sealed 3 files / 3,670,016 bytes and independent SHA-256 checks found zero mismatches.
+- Added and ran the opt-in two-card concurrent hardware probe. It copied the controlled D: full-size SD fixture (3 files / 1,310,762 bytes) and M: microSD fixture (3 files / 3,670,016 bytes) at the same time to separate unique folders under `F:\media-ingest-hardware-tests`, each with a receipt. Fresh independent SHA-256 comparison found 3 source files, 3 destination files, zero mismatches, and zero extras for both cards. This is core-only concurrency evidence; concurrent desktop IPC and physical remount/recovery remain open.
 - Windows discovery now asks the currently mounted logical unit for the SCSI VPD page 0x83 identifiers via `StorageDeviceIdProperty`, bounds and parses every returned `STORAGE_IDENTIFIER`, and sends only derived fingerprints across IPC. The code deliberately classifies that evidence as topology-scoped/non-immutable: a reader may synthesize a logical-unit ID, so it cannot authorize destination recall or formatting until attached-card testing proves it follows the physical medium. Rust local verification: 38 tests and clippy pass.
 - Before the run record transitions to copying, the native ingest command now validates distinct source/destination roots and checks the frozen plan’s byte total against space available on the destination (or its nearest existing parent). It fails closed before copying if space is already insufficient, while retaining normal write-time I/O errors as authoritative because this preflight is not a reservation. Rust local verification: 39 tests and clippy pass.
 - Windows now registers a bounded Configuration Manager disk-interface callback before enumerating each monitor stream, then reconciles every coalesced arrival/removal against a fresh native snapshot. The browser-facing payload still contains only typed device details and derived fingerprints. This is Windows build/unit evidence; attached-card hotplug evidence and macOS/Linux monitors remain pending.
@@ -39,6 +49,12 @@
 - Added a Linux discovery adapter which reads kernel mount and sysfs state directly: it parses `/proc/self/mountinfo`, accepts mounted `/dev/*` sources only when the parent block device reports `removable=1` in sysfs, and reports mount/filesystem/space plus the optional app marker. It intentionally exposes only session/filesystem-level evidence and no Linux hotplug monitor. The mount-info parser unit test runs locally; no Linux Rust target, runtime, USB, or hardware evidence exists on this Windows host.
 - Added a sanitized native ingest-history projection and UI panel. It shows run state, verified counts/bytes, and receipt availability only; source/destination paths, raw identity values, digests, and file names stay in SQLite. The history projection has local unit coverage, but native-runtime/rendered history evidence remains pending.
 - Windows device-change reconciliation now tracks each active ingest’s selected media key and mount root. Once that exact source has appeared in a native snapshot, a subsequent snapshot without it sets the cooperative cancellation flag, so bounded copy/verification stops at a chunk boundary instead of waiting solely for later I/O failure. The guard deliberately does not fire before first observation because a disk-interface arrival can precede mounting. Rust unit coverage proves both removal cancellation and the no-false-cancel arrival case; this is not proof against cloned mutable markers or a substitute for immutable-card identity/hardware tests.
+- Windows snapshot reconciliation now runs at most once per second even without a Configuration Manager disk-interface event. Each mounted volume is probed with `IOCTL_STORAGE_CHECK_VERIFY`; an absent or unreadable medium is omitted while its multi-slot USB reader remains represented by the other LUNs. This provides a per-card absence/reinsertion signal for connection generations instead of attempting to eject the shared reader. Rust unit tests cover generation behavior; packaged physical pull/reinsert evidence remains pending.
+- The rebuilt unsigned NSIS package `738E5C98644E3FAC72995B275CDA874F71D86BD4EB8866F12431602D607106E2` was installed and rendered both live SanDisk PRO-READER LUNs as the calibrated SD and microSD slots. This proves the packaged initial presence path, not removal/reinsertion until the card is physically cycled while the package is open.
+- The hardware-evidence panel now renders the native connection generation as `Insertion N`, which gives the operator a visible auditable signal for a card removal/reinsertion boundary. The installed package `7C8B9FA9ED1F6CDFFFC2C1526BFFCF9FE2714935AEA4EFEAB1F74381B560797E` rendered the selected SD card as `Insertion 1`; focused UI tests, TypeScript, changed-file lint/format, and the memory validator pass. Repository-wide lint remains blocked by pre-existing generated `.cert-target-v11/release/build/.../__global-api-script.js` outside this change.
+- The running package rendered the calibrated microSD as `Insertion 2` and reported that it was already auto-ingested. This is not physical-cycle evidence by itself: the connection tracker seeds generations from durable history after launch. Certification must capture the one-card absent state and then a returned card with a higher insertion value. It also does not test cancellation during removal, a fresh automatic transfer on another generation, destination loss, another reader, or another OS.
+- Packaged physical-cycle and fresh auto-ingest evidence: with the microSD selected, the running app observed a one-card inventory while it was absent, then restored two cards and rendered the returned LUN as `Insertion 3`. The registered profile started a new automatic transfer and sealed receipt `ca981d73-a337-49da-bf23-134bd93dca3d` for generation 3: five files / 2,688,024,576 bytes. Independent SHA-256 rereads matched all five source/destination pairs. Restarting the package then rendered `Registered card already auto-ingested for this mount` without a duplicate run. The initial live UI remained on a full-byte copying label after the receipt was sealed; terminal IPC/UI delivery still needs repair before the workflow is fully certified.
+- The UI now polls native ingest history every two seconds only while it has an active operation. If the matching operation is already completed with a sealed receipt, the UI clears the stale active state, records the completed-run association, and renders verified completion. Focused UI tests and TypeScript pass; package-level recurrence remains required.
 - Introduced a native quick-format authorization preflight without adding a destructive provider. It verifies that an immutable SQLite receipt belongs to the requested run, source key, and source generation; requires exactly one currently observed `hardware_immutable` device and no active ingest; then retains a random 60-second opaque token only in process memory. The request accepts no paths, disk numbers, or formatter arguments. Current discovery never promotes the marker, volume, VPD, or reader evidence to that identity level, so this cannot enable format prematurely. The future elevated provider must consume the token once and repeat its exact-device check.
 - Windows direct SD-stack discovery now sends the documented read-only CMD2 request through `IOCTL_SFFDISK_DEVICE_COMMAND` and accepts only a nonzero 16-byte CID response. Its raw CID remains native; IPC receives a derived medium fingerprint, `SdCid` evidence, and `hardware_immutable` confidence. USB mass-storage readers that do not forward native SD commands get no CID and remain unresolved; a test fixture validates only buffer parsing/identity projection, not a real controller or card.
 - Live Windows hardware evidence: with a SanDisk PRO-READER and sacrificial full-size SD card, the empty-reader baseline was two no-media logical units. Controlled insertion produced a healthy 255.9 GB exFAT card on logical unit 0 (`D:`) while logical unit 1 remained empty (`M:`); the running native Tauri UI rendered the same topology. The reader supplied filesystem/session evidence only, so no immutable card CID was claimed and Format remained disabled. This establishes this reader's LUN 0 -> SD calibration evidence only; microSD and other-reader/OS checks remain pending.
@@ -80,9 +96,145 @@
 
 For active work, see [Active context](activeContext.md). For evidence requirements, see [Certification matrix](certification-matrix.md).
 
+- 2026-08-27 — Repaired the live sacrificial M: card's existing exFAT
+  filesystem corruption after exact removable-volume verification. Windows
+  `chkdsk M: /f` repaired a corrupt allocation bitmap and one cross-linked
+  controlled MP4 allocation; fresh inspection returned `Healthy` / `OK` and
+  retained exFAT. This is OS repair evidence, not application format proof.
+- 2026-08-27 — Hardened Windows formatter diagnostics: native WMI input,
+  missing output, and unreadable return values are distinct safe failures.
+  Marker sibling writes now remove a temporary file if writing or syncing fails.
+  Focused Rust checks pass; package `E96A81C4…2996` is ready for the next
+  confirmed managed-card auto-format run.
+
 - 2026-08-24 — Rebuilt the React operator presentation as a Tailwind-first blue system with light and dark modes. The header mode toggle updates the document theme; the responsive source rail, ingest planning controls, reader evidence, verification state, and history all use shared Tailwind color/spacing variants. Browser fixture QA captured light desktop plus dark desktop/mobile renders. This does not change native ingest behavior or certify packaged desktop rendering.
 - 2026-08-24 — Moved auto-ingest registration into a dedicated modal launched by “Set up auto-ingest.” The modal keeps destination, explicit auto-ingest consent, conditional auto-format preference, mutable-marker disclosure, cancellation, and the existing typed registration action together. Fixture test and browser screenshot validate the open/configure state; native registration execution remains unverified.
 - 2026-08-24 — Refined the auto-ingest setup dialog after visual QA: opening it now prepopulates a known card destination, enables the save action for that valid fixture state, supports Escape/backdrop dismissal, and is evidenced with a viewport-only screenshot so the modal backdrop is represented accurately.
 - 2026-08-24 — Added Tauri plugin-dialog support for destination selection. The main ingest plan and auto-ingest setup each offer a native “Choose…” directory control, use the selected path in their existing card-scoped state, and continue to allow direct path input for fallback. The plugin has a narrow `dialog:allow-open` capability and Rust `cargo check` passes; native OS dialog interaction remains unverified.
 
 - 2026-08-24 — Refined the React operator workspace into a minimalist desktop ingest surface. The source rail, workflow panels, verification banner, history surface, type scale, borders, controls, and responsive layout now share a reduced dark native-workspace system. This is visual/browser-fixture work only; it does not change native ingest behavior or certify a packaged desktop render.
+
+# 2026-08-26 — Native Windows hardware validation
+
+- Connected the SanDisk Professional PRO-READER and inspected live Windows inventory: LUN 0 was a no-media endpoint and LUN 1 was a mounted 511.8 GB exFAT card.
+- Created a controlled three-file fixture totaling 3,670,016 bytes on the sacrificial mounted card. The native Tauri UI scanned it, previewed deterministic organization, then completed a verified ingest into an isolated F: destination.
+- The native workflow reported all three files verified, sealed receipt `92ff1f3c-e591-447f-901d-82d63e5dc441.json`, and created the source marker. Independent post-run SHA-256 comparison found three destination files, identical lengths, and zero mismatches.
+- Validated the safety gate: after completion, quick format remained unavailable because USB-reader discovery exposed only unresolved card identity. No destructive format was attempted.
+- Ran lint, strict TypeScript check, Vitest (6 tests), production build, Rust fmt/clippy/tests (77 passed; 3 hardware probes intentionally ignored), and memory-bank verification. On 2026-08-26, Prettier normalized `src/App.css`, `src/App.test.tsx`, and `src/App.tsx`; the full aggregate `npm run check` now passes.
+- Not certified in this pass: slot-calibration persistence across reconnect/another reader, auto-ingest remount, cancellation/recovery, eject, destructive format, performance, macOS, or Linux.
+
+- 2026-08-26 — The operator confirmed physical placement and the native desktop calibration flow persisted the exact reader's labels: LUN 0 / 255.8 GB is `SD slot (calibrated)` and LUN 1 / 511.8 GB is `microSD slot (calibrated)`. The refreshed live inventory rendered both labels. This is installation-local, single-reader Windows evidence; it does not yet certify reconnect stability, another reader, or other OSes.
+- 2026-08-26 — The full-size SD card came online and the native scan found 19 files. Because the card contains content outside the controlled test folder, no full-card ingest was started and no unrelated source material was copied. Its end-to-end ingest certification remains open.
+
+- 2026-08-26 — Added a desktop-IPC fixture for auto-ingest: a recognized registered marker profile starts exactly once for a connection generation, preserves its stored one-minute camera-interval setting in the native request, and is not started again after a same-generation inventory refresh. This verifies the React orchestration boundary only; it is not a physical card removal/reinsert certification.
+
+- 2026-08-26 — Added a fail-closed Windows safe-eject provider and operator control. The backend rechecks the sealed receipt, immutable medium key, current connection generation, unique mount, and absence of active ingests; it then uses a provider-owned exclusive volume handle to flush, lock, dismount, and request `IOCTL_STORAGE_EJECT_MEDIA`. The rendered fixture keeps the control disabled until a verified completion, while IPC fixtures prove the typed completion-to-eject request. Native physical eject and all non-Windows providers remain unverified.
+
+- 2026-08-26 — Added an active-ingest close gate. A native close request now remains open whenever the Rust scheduler has active work and emits an operator choice to keep ingesting or request cooperative cancellation. This guard also renders if removal leaves no currently mounted card, so source removal cannot hide the decision. Browser fixtures and a Rust active-scheduler test pass. The app also refreshes native inventory/history when it regains focus; desktop Tauri does not expose sleep/wake events, so native window-close, platform power-event, and power-loss scenarios remain unverified.
+
+- 2026-08-26 — Closed the packaged concurrent-IPC evidence gap for ordinary ingest. The freshly rebuilt unsigned Windows executable (`C033C78526B65A504FFF4FA6CB0C3829CC763F85AD679C1F23198D43839F8A46`; NSIS `1999C736FD5160136A19E66170BC42C9D43035A45A101D3EF7FA1D2348AD1101`) accepted a full-size SD ingest while the microSD UI was actively copying. Both completed to separate isolated destinations: microSD receipt `4f4ceb3b-5ed9-4e8d-ac79-43486619700a` sealed 5 files / 2,688,024,576 bytes; full-size SD receipt `235d92c7-6f73-4bb0-936c-753b87a8f093` sealed 19 files / 6,465,617 bytes. Independent SHA-256 re-read found 5/5 and 19/19 matching payload files with zero missing, extra, or mismatched files after excluding the marker and Windows system metadata. The run first exposed stale post-marker webview inventory; `App.tsx` now refreshes native inventory after successful completion and its focused browser test verifies that refresh. This remains partial certification: recovery/interruption, physical remount, another reader, destination failure, and macOS/Linux are not evidenced.
+
+- 2026-08-26 — Packaged lifecycle recovery and auto-ingest restart evidence passed after installing the current rebuilt Windows NSIS package. Cancelling a 2.688 GB microSD verification produced `recovery_required` with no receipt. Exact-generation recovery run `9a58236c-102b-487f-a4c1-d0c5062e1ae1` then transitioned through explicit recovery to completed and sealed a five-file / 2,688,024,576-byte BLAKE3 receipt; all five persisted source/destination digests matched. With the same registered card still mounted, app restart rendered “Registered card already auto-ingested for this mount” and created no duplicate automatic run. Physical removal/reinsert, crash/sleep, safe eject, source/destination failure, second-reader, macOS, and Linux coverage remain open.
+
+- 2026-08-26 — Corrected cancellation checkpoint handling to match the recovery contract. An interrupted copy now flushes and retains a deterministic, entry-scoped `.partial` file rather than deleting it. The same exact frozen-plan entry explicitly removes that owned regular checkpoint before a fresh full copy and verification; symlinks, directories, and unrelated names are never followed or removed. The focused Rust lifecycle test proves cancellation leaves no final media, retains the partial, and explicit recovery removes it before completing. This is local source evidence; a packaged cancellation/recovery rerun is still required for the new partial behavior.
+
+- 2026-08-26 — Rebuilt, installed, and exercised the partial checkpoint path in the Windows NSIS package. Cancelling M: → `F:\\media-ingest-partial-cert-20260826` during the 2.688 GB copy left `caf94fcc-89c9-453c-afcc-3201c5022a0d` in `recovery_required` and created its deterministic entry-scoped partial. The UI then resumed that exact run; recovery removed the partial, completed the frozen five-file plan, and sealed a 2,688,024,576-byte BLAKE3 receipt. Independent SHA-256 comparison found all five source/destination files matched with zero differences and no partial remained. This is cooperative-cancellation package evidence, not a physical-removal, crash, or power-loss test.
+
+- 2026-08-26 — Replaced the Windows volume-level SCSI media-eject request with PnP safe removal of the exact disk devnode selected by the verified volume. The provider flushes/locks/dismounts first, maps disk device numbers through SetupAPI, and calls `CM_Request_Device_EjectW` only on the matched disk; it never ejects the shared reader parent. It reports PnP veto/non-ejectable results and safely allows a current marker-backed card for this non-destructive operation. A sealed local history row now restores the operator eject control after restart. Focused Rust tests, clippy, strict TypeScript, ESLint for changed files, and the browser fixture passed. This is source/test evidence only until a rebuilt Windows package demonstrates actual mount disappearance.
+
+- 2026-08-26 — The first rebuilt package correctly restored and enabled the safe-eject control from the existing sealed full-size-SD receipt, but its real PnP request reported the card busy and did not remove it. Diagnosis found the provider still held its own exclusive volume lock while calling `CM_Request_Device_EjectW`, allowing the app to veto itself. The provider now closes that handle after flush/lock/dismount and before the PnP removal request. Focused Rust tests and clippy pass; the corrected package still needs installation and hardware rerun.
+
+- 2026-08-26 — Installed corrected Windows NSIS package `7782AAB8BAD61122C0509323CF17DC0E93BA72230AF4E0569CC94F9CA0FB7E01` (installed executable `94175D1D04BB4D62CECF1E93035664F2D4A4AEC8F6D686E13115C8BC18BED401`) and retried safe eject on the selected full-size SD card. Windows still vetoed removal with no veto name, and the inventory remained at two cards. Read-only PnP inspection found the selected LUN and its sibling advertise capability `0x10` only; their shared USB parent does not advertise Windows eject support. This is a reader capability limit, not an application success: the control now accurately reports that Windows cannot safely remove the card, and the reader/card must be removed physically only after the user has closed file users. Do not eject the shared parent because it would also affect the mounted microSD card.
+
+- 2026-08-27 — Implemented the missing manual quick-format execution path. The UI requests a 60-second opaque native authorization and presents an explicit media/capacity/receipt/profile/recoverability confirmation. Native execution consumes the token before repeat immutable identity, generation, receipt, and profile checks; it then invokes the provider, validates remount plus a durable sentinel, conditionally restores a registered marker, and records the format receipt. Focused Rust authorization tests, `cargo fmt --check`, `cargo check`, Prettier, strict TypeScript, and 11 UI fixtures pass. The attached PRO-READER cards remain unresolved/reader-bound, so native UI correctly withheld format and no destructive operation was attempted.
+
+- 2026-08-27 — Upgraded newly created verified-ingest markers to a compact `MIT2` managed-card record: random UUID token plus the completed path-free BLAKE3 manifest root, under 128 bytes. Legacy `MIT1` records remain compatible and malformed records fail closed. Focused marker tests, `cargo fmt --check`, and `cargo check` pass. The record is explicitly mutable/copyable continuity evidence and does not authorize automatic destination recall or formatting.
+
+- 2026-08-27 — The first managed-card destructive package exercise preserved
+  the five-file/2,688,024,576-byte microSD source and sealed verified receipts,
+  but formatted nothing. Diagnosis found a prior zero-byte marker and a
+  mutable-marker operation-key transition after receipt sealing; both resulted
+  in a safe `skipped` auto-format outcome. Marker replacement is now durable
+  (synced sibling then OS replace), empty interrupted reserved markers are
+  repaired, and the marker is profile evidence only—the native/session
+  operation key remains stable through marker creation. Focused Rust tests and
+  `cargo check` pass. NSIS package
+  `19AF80DD2CBB183CC9B30ED33830865443DAAF0EA2DB58FBB2A9A6EF2116FE7D`
+  is installed; a freshly confirmed M: remount is still required for the
+  destructive format/remount/receipt proof.
+
+- 2026-08-27 — Refined the React operator presentation without changing native
+  ingest behavior: added the editorial-utility type hierarchy, subtle grid
+  surface, translucent sticky command bar, source rail treatment, keyboard skip
+  link, visible focus treatment, and reduced-motion/dark-color-scheme support.
+  Fixture TypeScript and Vitest checks pass, and light/dark browser screenshots
+  were captured. Packaged/native UI evidence remains unchanged.
+
+- 2026-08-27 — Corrected the operator control presentation and accessibility
+  baseline: previously link-like secondary actions now have visible button
+  boundaries; labels and actions use Title Case; the no-op Settings control was
+  removed; destination fields have semantic names, autocomplete protection, and
+  disabled spellcheck. The existing skip link, focus treatment, dark color
+  scheme, reduced motion, and modal overscroll boundary complete the WCAG
+  AA-oriented fixture surface. Prettier, strict TypeScript, 12 Vitest fixtures,
+  production build, and desktop/mobile browser checks pass. This is not formal
+  WCAG certification or native packaged-app evidence.
+
+- 2026-08-27 — Corrected the cramped secondary-action regression from the
+  accessibility pass. Link-sized labels such as `Change` and `View Details`
+  now render as consistent rounded 40 px controls with horizontal padding;
+  the heading font was returned to the more legible native sans family. Browser
+  QA measured `Change` at 80 by 40 px with 12 px horizontal padding and found
+  no console errors. This is browser-fixture evidence only.
+
+- 2026-08-27 — Diagnosed the live native M: format refusal: the exact
+  `MSFT_Volume.Format` exFAT quick-format request returns code `43006`
+  (read-only volume) while the underlying disk remains online/healthy and
+  non-read-only. No card content changed. The Windows provider now maps this
+  code to its write-protected outcome, tracks returned storage jobs, and
+  requires marker removal before it can record format success. `cargo check`,
+  12 Vitest fixtures, and memory-bank validation pass; physical destructive
+  manual/auto-format certification remains blocked by the Windows response.
+
+- 2026-08-27 — Replaced the incompatible WMI format operation with the proven
+  Windows `Format-Volume` native formatter while retaining WMI exact-target
+  binding and post-format validation. The exact M: 511.8 GB card was formatted
+  as exFAT successfully: it is healthy and its prior media/marker are absent.
+  `cargo check`, 12 Vitest fixtures, and memory-bank validation pass. The
+  remaining physical evidence is an app-owned manual receipt/marker restore,
+  followed by matching auto-ingest format proof.
+
+- 2026-08-27 — Physical auto-ingest/auto-format certification on the managed
+  511.8 GB M: microSD completed run `217d7fdd-cf17-45dd-b587-d81507d2e605`:
+  the app verified controlled media, sealed its receipt, completed native exFAT
+  formatting, restored the managed marker, and recorded `sdxc-default` format
+  receipt. A follow-on empty mount exposed a duplicate-generation auto-ingest;
+  the native profile gate now suppresses only a post-format card that enumerates
+  as empty, while the UI retries a marker profile that becomes available after
+  the first mount observation.
+
+- 2026-08-27 — Repeated the physical automatic workflow using the freshly
+  packaged release x64 executable. Bundle SHA-256
+  `AE3C98F30A5E1ED116496DC5DDD678E501EFAEC8F07F8370E3AA94840940A305` completed
+  automatic run `cf3048a9-a70f-4edc-9b2d-2afc3e175009` and its `sdxc-default`
+  format receipt. M: revalidated as healthy exFAT at 511,801,556,992 bytes with
+  only `System Volume Information` and the managed marker.
+
+- 2026-08-27 — Added a native empty-auto-ingest backstop. A zero-file
+  mount-triggered plan now completes as a typed skipped result before creating
+  an ingest row, preventing post-format remount races from polluting history
+  with a failed automatic run. Focused Rust test, Rust check, UI tests, and
+  TypeScript pass.
+
+- 2026-08-27 — Rebuilt the NSIS package after the empty-auto-ingest hardening
+  (SHA-256 `D27925F12445C80ED9F0DD0FBE6443818C8A783338F7FD9F0C14F6F9F9B0EDA1`),
+  installed it silently with exit code 0, and launched the installed
+  `%LOCALAPPDATA%\\Media Ingest Tool\\media-ingest-tool.exe`. It observed the
+  retained managed M: marker, healthy exFAT mount, and completed format
+  receipt. Clean-machine and cross-platform installation evidence remains open.
+
+- 2026-08-27 — Improved the operator inventory presentation: every connected
+  source now shows its observed drive letter and filesystem with capacity, free
+  space, and reader slot; the source detail repeats that drive detail. History
+  outcomes now use title case. Mount letters are explicitly presentation-only
+  and do not affect source identity, destination recall, or format authority.

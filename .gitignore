@@ -20,6 +20,7 @@ build/
 coverage/
 output/
 .cargo-target-*/
+/.cert-target-*/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts

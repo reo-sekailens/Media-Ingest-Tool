@@ -38,6 +38,8 @@ The observation used read-only `Get-PnpDevice`, `Get-PnpDeviceProperty`, `Get-Di
 
 On 2026-08-23, after capturing the empty-reader baseline, an operator inserted a sacrificial full-size SD card into the physical SD slot of the same PRO-READER. Windows then reported logical unit 0 as an online, healthy 255.9 GB removable exFAT disk mounted at `D:`; logical unit 1 remained no-media/zero capacity. The running native application independently showed the populated unit as logical unit 0 and the empty companion as logical unit 1. This establishes a calibration record of **reader fingerprint + LUN 0 -> SD** for this reader only. It does not establish LUN 1 -> microSD until a separate controlled microSD insertion, and it does not promote reader topology to card identity or format authorization.
 
+On 2026-08-26, the operator confirmed the physical cards: the 255.8 GB LUN 0 card is full-size SD and the 511.8 GB LUN 1 card is microSD. The native Windows calibration UI persisted those values and, after refresh, rendered `SD slot (calibrated)` for LUN 0 and `microSD slot (calibrated)` for LUN 1. This completes a user-observed two-slot correlation for this one reader/session; it remains `single-unit` confidence until reconnect and second-reader repetitions pass.
+
 ## Identity model
 
 Keep these identifiers separate:

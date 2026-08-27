@@ -1,8 +1,19 @@
 # TASK008 — React operator workflow and accessible device UI
 
-- **Status:** in progress — fixture/native inventory distinction, a card-scoped native source-media scan, card-scoped session destinations and sort controls, a native read-only organization-preview control, controlled reader-slot calibration, card-keyed concurrent native operation/cancellation state, and typed queued/copying/verifying/completed/failed/cancelled progress stages are implemented. The active native copy counter advances from actual 1 MiB writes; the UI derives a copy-stage average rate and ETA from those bytes. The preview shows totals and representative paths without copying and is discarded when its destination or sort rule changes. A native local-history panel shows only run state, verified counts/bytes, and receipt availability after media removal. The React surface now uses a Tailwind-first minimalist blue system with an accessible light/dark mode toggle, plus a modal-first auto-ingest setup flow that preserves the typed native registration boundary and explains the marker limitation. Destination fields now prefer a permitted Tauri native directory picker and retain manual typing only as fallback. Per-file progress, verification-stage byte progress, durable strong-identity destination recall UI, accessible format confirmation, and cross-platform native rendered evidence remain pending.
+- **Status:** in progress — fixture/native inventory distinction, a card-scoped native source-media scan, card-scoped session destinations and sort controls, a native read-only organization-preview control, controlled reader-slot calibration, card-keyed concurrent native operation/cancellation state, and typed queued/copying/verifying/completed/failed/cancelled progress stages are implemented. The active native copy counter advances from actual 1 MiB writes and carries the one-based planned-file ordinal and total file count without exposing paths; the same path-free per-file byte stream reports the fresh destination digest readback as `verifying`. The UI shows the ordinal for manual, recovery, and auto-ingest copies and verification, and derives copy-stage average rate and ETA from aggregate bytes. The preview shows totals and representative paths without copying and is discarded when its destination or rule changes. A native local-history panel shows only run state, verified counts/bytes, and receipt availability after media removal. The React surface now uses a Tailwind-first minimalist blue system with an accessible light/dark mode toggle, plus a modal-first auto-ingest setup flow that preserves the typed native registration boundary and explains the marker limitation. Automatic-run state is now persisted by exact identity/generation rather than only in the webview: a fresh session visibly reports that this mount has already been auto-ingested and does not start another copy. Browser coverage verifies this suppression, a recognized profile's interval, and copying/verification ordinal updates. After any successful ingest, the client refreshes native inventory before accepting another action, reconciling marker-created mutable keys without weakening Rust's exact current-source revalidation. The freshly rebuilt package then completed concurrent full-size-SD and microSD UI ingests. Destination fields now prefer a permitted Tauri native directory picker and retain manual typing only as fallback. Durable strong-identity destination recall UI, accessible format confirmation, physical-remount auto-ingest, recovery verification progress for files already published before a crash, and cross-platform native rendered evidence remain pending.
 - **Depends on:** TASK001, TASK002, TASK003, TASK004, TASK007
 - **Unlocks:** TASK005 operator flow, TASK010
+- **Latest visual evidence:** 2026-08-27 browser fixtures capture the refined
+  light and dark operator workspace. This is browser evidence only; no
+  packaged-desktop rendering claim is made.
+- **Latest accessibility evidence:** Secondary actions render with visible
+  button boundaries; keyboard skip/focus treatment, named destination fields,
+  modal overscroll containment, dark color-scheme support, and reduced motion
+  are source- and browser-fixture-checked. Formal WCAG AA conformance and
+  packaged-platform verification remain pending.
+- **Control-spacing evidence:** 2026-08-27 browser QA confirms visible rounded
+  secondary controls (for example, `Change` measures 80 by 40 px with 12 px
+  horizontal padding), replacing the prior cramped link-like presentation.
 
 ## Objective
 
@@ -39,6 +50,14 @@ Build a calm, high-information desktop workflow in React and TypeScript with Tai
 - Layout remains usable at the minimum supported window size and at 200% scaling.
 - TypeScript strict checks, component tests, accessibility checks, and browser fixture flows pass.
 - Windows, macOS, and Linux native screenshots are captured for the source, ingest, verified, failure, and format-confirmation states.
+
+## Latest UI evidence
+
+- 2026-08-27 — Connected-media cards now present observed mounted drive letters
+  and filesystem details with capacity/free-space and reader-slot details; the
+  selected source repeats the drive information. History outcome labels are
+  title-cased. Drive letters are mutable presentation details and cannot serve
+  as source identity, destination-recall, or format-authorization evidence.
 
 ## Research sources
 

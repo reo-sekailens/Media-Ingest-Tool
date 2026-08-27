@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Serialize;
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 11;
 
 pub struct LocalStore {
     connection: Connection,
@@ -38,6 +38,9 @@ pub struct RecoverableIngestRun {
     pub source_generation: u64,
     pub source_root: String,
     pub destination_root: String,
+    /// Preserves whether the interrupted run was started by the registered
+    /// mount workflow, so recovery retains its native-only auto-format gate.
+    pub auto_ingest_triggered: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +71,10 @@ pub struct PlannedFileRecord {
 #[serde(rename_all = "camelCase")]
 pub struct IngestHistoryEntry {
     pub run_id: String,
+    /// Opaque comparison key only; it is used to restore safe-eject eligibility
+    /// for the currently re-observed device, not rendered to the operator.
+    pub source_identity_key: String,
+    pub source_generation: u64,
     pub state: String,
     pub updated_at: String,
     pub verified_file_count: u64,
@@ -134,6 +141,7 @@ impl LocalStore {
               source_generation INTEGER NOT NULL,
               source_root TEXT,
               destination_root TEXT,
+              auto_ingest_triggered INTEGER NOT NULL DEFAULT 0 CHECK(auto_ingest_triggered IN (0, 1)),
               state TEXT NOT NULL,
               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
               updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -200,10 +208,23 @@ impl LocalStore {
             INSERT OR IGNORE INTO schema_migration(version) VALUES (7);
             INSERT OR IGNORE INTO schema_migration(version) VALUES (8);
             INSERT OR IGNORE INTO schema_migration(version) VALUES (9);
+            INSERT OR IGNORE INTO schema_migration(version) VALUES (10);
+            INSERT OR IGNORE INTO schema_migration(version) VALUES (11);
             ",
         )?;
         self.add_column_if_missing("ingest_run", "source_root", "TEXT")?;
         self.add_column_if_missing("ingest_run", "destination_root", "TEXT")?;
+        self.add_column_if_missing(
+            "ingest_run",
+            "auto_ingest_triggered",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(auto_ingest_triggered IN (0, 1))",
+        )?;
+        self.connection.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ingest_run_one_auto_mount
+              ON ingest_run(source_identity_key, source_generation)
+              WHERE auto_ingest_triggered = 1
+                AND state IN ('queued', 'copying', 'recovery_required', 'completed');",
+        )?;
         self.add_column_if_missing(
             "marker_ingest_profile",
             "auto_format_enabled",
@@ -214,7 +235,7 @@ impl LocalStore {
             "interval_minutes",
             "INTEGER CHECK(interval_minutes IS NULL OR (interval_minutes >= 1 AND interval_minutes <= 1440))",
         )?;
-        debug_assert_eq!(SCHEMA_VERSION, 9);
+        debug_assert_eq!(SCHEMA_VERSION, 11);
         Ok(())
     }
 
@@ -357,7 +378,8 @@ impl LocalStore {
         let limit = i64::from(requested_limit.clamp(1, 50));
         let mut statement = self.connection.prepare(
             "
-            SELECT run.run_id, run.state, run.updated_at,
+            SELECT run.run_id, run.source_identity_key, run.source_generation,
+                   run.state, run.updated_at,
                    COALESCE(receipt.verified_file_count, 0),
                    COALESCE(receipt.verified_bytes, 0),
                    receipt.run_id IS NOT NULL
@@ -371,11 +393,13 @@ impl LocalStore {
             .query_map(params![limit], |row| {
                 Ok(IngestHistoryEntry {
                     run_id: row.get(0)?,
-                    state: row.get(1)?,
-                    updated_at: row.get(2)?,
-                    verified_file_count: row.get(3)?,
-                    verified_bytes: row.get(4)?,
-                    receipt_available: row.get(5)?,
+                    source_identity_key: row.get(1)?,
+                    source_generation: row.get(2)?,
+                    state: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    verified_file_count: row.get(5)?,
+                    verified_bytes: row.get(6)?,
+                    receipt_available: row.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -425,18 +449,39 @@ impl LocalStore {
         source_root: &str,
         destination_root: &str,
     ) -> rusqlite::Result<()> {
+        self.begin_ingest_run_with_mode(
+            run_id,
+            identity,
+            source_generation,
+            source_root,
+            destination_root,
+            false,
+        )
+    }
+
+    pub fn begin_ingest_run_with_mode(
+        &mut self,
+        run_id: &str,
+        identity: &SourceIdentityRecord,
+        source_generation: u64,
+        source_root: &str,
+        destination_root: &str,
+        auto_ingest_triggered: bool,
+    ) -> rusqlite::Result<()> {
         let transaction = self.connection.transaction()?;
         upsert_identity(&transaction, identity)?;
         transaction.execute(
             "INSERT INTO ingest_run(
-                run_id, source_identity_key, source_generation, source_root, destination_root, state
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                run_id, source_identity_key, source_generation, source_root, destination_root,
+                auto_ingest_triggered, state
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 run_id,
                 identity.identity_key,
                 source_generation,
                 source_root,
                 destination_root,
+                auto_ingest_triggered,
                 ingest_run_state_name(IngestRunState::Queued),
             ],
         )?;
@@ -446,6 +491,60 @@ impl LocalStore {
             params![run_id, ingest_run_state_name(IngestRunState::Queued)],
         )?;
         transaction.commit()
+    }
+
+    /// A persisted completed automatic run suppresses another automatic copy
+    /// for the same currently observed insertion generation, including after a
+    /// desktop-app restart. A later physical removal/reinsert receives a new
+    /// generation and is eligible again.
+    pub fn has_completed_auto_ingest_for_source(
+        &self,
+        source_identity_key: &str,
+        source_generation: u64,
+    ) -> rusqlite::Result<bool> {
+        self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM ingest_run AS run
+                INNER JOIN ingest_receipt AS receipt ON receipt.run_id = run.run_id
+                WHERE run.source_identity_key = ?1
+                  AND run.source_generation = ?2
+                  AND run.auto_ingest_triggered = 1
+                  AND run.state = 'completed'
+             )",
+            params![source_identity_key, source_generation],
+            |row| row.get(0),
+        )
+    }
+
+    /// A freshly formatted managed card can be rediscovered as a new
+    /// connection generation while its marker is being restored. This record
+    /// is only a post-format suppression hint; it never authorizes a format.
+    pub fn has_completed_format_for_source(
+        &self,
+        source_identity_key: &str,
+    ) -> rusqlite::Result<bool> {
+        self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM format_receipt
+                WHERE source_identity_key = ?1
+                  AND marker_restored = 1
+             )",
+            params![source_identity_key],
+            |row| row.get(0),
+        )
+    }
+
+    /// Returns the newest observed insertion generation for each identity so
+    /// the in-memory connection tracker can survive an app restart. The
+    /// tracker still advances a generation only after it observes removal.
+    pub fn latest_source_generations(&self) -> rusqlite::Result<Vec<(String, u64)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT source_identity_key, MAX(source_generation)
+             FROM ingest_run
+             GROUP BY source_identity_key",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
     }
 
     pub fn transition_ingest_run(
@@ -484,6 +583,30 @@ impl LocalStore {
                 ingest_run_state_name(next),
                 reason,
             ],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Records a non-state-changing, native-only outcome against an existing
+    /// ingest. This preserves destructive-operation diagnostics even after a
+    /// completed run no longer appears as an active UI operation.
+    pub fn record_ingest_note(&mut self, run_id: &str, reason: &str) -> rusqlite::Result<bool> {
+        let transaction = self.connection.transaction()?;
+        let state = transaction
+            .query_row(
+                "SELECT state FROM ingest_run WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(state) = state else {
+            return Ok(false);
+        };
+        transaction.execute(
+            "INSERT INTO state_event(run_id, previous_state, next_state, reason)
+             VALUES (?1, ?2, ?2, ?3)",
+            params![run_id, state, reason],
         )?;
         transaction.commit()?;
         Ok(true)
@@ -555,7 +678,8 @@ impl LocalStore {
     ) -> rusqlite::Result<Option<RecoverableIngestRun>> {
         self.connection
             .query_row(
-                "SELECT run_id, source_identity_key, source_generation, source_root, destination_root
+                "SELECT run_id, source_identity_key, source_generation, source_root, destination_root,
+                        auto_ingest_triggered
                  FROM ingest_run
                  WHERE run_id = ?1 AND state = 'recovery_required'
                    AND source_root IS NOT NULL AND destination_root IS NOT NULL",
@@ -567,6 +691,7 @@ impl LocalStore {
                         source_generation: row.get(2)?,
                         source_root: row.get(3)?,
                         destination_root: row.get(4)?,
+                        auto_ingest_triggered: row.get(5)?,
                     })
                 },
             )
@@ -794,6 +919,19 @@ impl LocalStore {
         )?;
         transaction.commit()?;
         Ok(inserted == 1)
+    }
+
+    /// Returns only the path-free manifest root for a sealed receipt. Native
+    /// managed-card formatting uses it to verify the compact marker witness;
+    /// it never exposes a source path or file list to IPC.
+    pub fn receipt_manifest_root(&self, run_id: &str) -> rusqlite::Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT manifest_root_blake3 FROM ingest_receipt WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     /// Atomically records every verified plan entry, seals its immutable
@@ -1104,6 +1242,117 @@ mod tests {
     }
 
     #[test]
+    fn completed_auto_ingest_is_scoped_to_the_exact_insertion_generation() {
+        let mut store = LocalStore::in_memory().expect("store");
+        let source = identity("v1:card-auto", IdentityStrength::HardwareStrong);
+        store
+            .begin_ingest_run_with_mode("auto-run", &source, 7, "/source", "/destination", true)
+            .expect("begin automatic run");
+        assert!(store
+            .transition_ingest_run("auto-run", IngestRunState::Copying, "worker started")
+            .expect("copying"));
+        assert!(store
+            .transition_ingest_run("auto-run", IngestRunState::Completed, "receipt sealed")
+            .expect("completed"));
+        store
+            .connection
+            .execute(
+                "INSERT INTO ingest_receipt(run_id, manifest_algorithm, manifest_root_blake3, verified_file_count, verified_bytes)
+                 VALUES ('auto-run', 'blake3:test', 'root', 1, 1)",
+                [],
+            )
+            .expect("receipt");
+
+        assert!(store
+            .has_completed_auto_ingest_for_source("v1:card-auto", 7)
+            .expect("same generation"));
+        assert!(store
+            .begin_ingest_run_with_mode(
+                "duplicate-auto-run",
+                &source,
+                7,
+                "/source",
+                "/destination",
+                true,
+            )
+            .is_err());
+        assert!(!store
+            .has_completed_auto_ingest_for_source("v1:card-auto", 8)
+            .expect("next insertion remains eligible"));
+        assert!(store
+            .begin_ingest_run_with_mode(
+                "next-insertion-auto-run",
+                &source,
+                8,
+                "/source",
+                "/destination",
+                true,
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn completed_format_is_available_only_as_a_source_lookup() {
+        let mut store = LocalStore::in_memory().expect("store");
+        let source = identity("v1:formatted-card", IdentityStrength::HardwareStrong);
+        store
+            .begin_ingest_run_with_mode(
+                "formatted-run",
+                &source,
+                7,
+                "/source",
+                "/destination",
+                true,
+            )
+            .expect("begin");
+        assert!(store
+            .transition_ingest_run("formatted-run", IngestRunState::Copying, "worker started")
+            .expect("copying"));
+        assert!(store
+            .transition_ingest_run("formatted-run", IngestRunState::Completed, "receipt sealed")
+            .expect("completed"));
+        store
+            .connection
+            .execute(
+                "INSERT INTO ingest_receipt(run_id, manifest_algorithm, manifest_root_blake3, verified_file_count, verified_bytes)
+                 VALUES ('formatted-run', 'blake3:test', 'root', 1, 1)",
+                [],
+            )
+            .expect("receipt");
+        assert!(store
+            .record_completed_format("formatted-run", "v1:formatted-card", 7, "sdxc-default")
+            .expect("format receipt"));
+        assert!(store
+            .has_completed_format_for_source("v1:formatted-card")
+            .expect("lookup"));
+        assert!(!store
+            .has_completed_format_for_source("v1:other-card")
+            .expect("lookup"));
+    }
+
+    #[test]
+    fn latest_source_generations_returns_the_newest_generation_per_identity() {
+        let mut store = LocalStore::in_memory().expect("store");
+        let first = identity("v1:first", IdentityStrength::HardwareStrong);
+        let second = identity("v1:second", IdentityStrength::HardwareStrong);
+        store
+            .begin_ingest_run("first-old", &first, 2, "/source", "/destination")
+            .expect("first old");
+        store
+            .begin_ingest_run("first-new", &first, 5, "/source", "/destination")
+            .expect("first new");
+        store
+            .begin_ingest_run("second", &second, 3, "/source", "/destination")
+            .expect("second");
+
+        let generations = store.latest_source_generations().expect("generations");
+        assert_eq!(
+            generations,
+            vec![("v1:first".into(), 5), ("v1:second".into(), 3)]
+        );
+    }
+
+    #[test]
     fn newly_migrated_database_passes_integrity_check() {
         let store = LocalStore::in_memory().expect("store");
         assert!(store.integrity_check().expect("integrity"));
@@ -1152,6 +1401,8 @@ mod tests {
         let history = store.recent_ingest_runs(20).expect("history");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].run_id, "run-history");
+        assert_eq!(history[0].source_identity_key, "v1:card-history");
+        assert_eq!(history[0].source_generation, 3);
         assert_eq!(history[0].state, "completed");
         assert_eq!(history[0].verified_file_count, 0);
         assert_eq!(history[0].verified_bytes, 0);
@@ -1453,6 +1704,7 @@ mod tests {
                 source_generation: 1,
                 source_root: "/source".into(),
                 destination_root: "/destination".into(),
+                auto_ingest_triggered: false,
             }
         );
         assert!(store
@@ -1467,5 +1719,29 @@ mod tests {
         assert!(store
             .begin_explicit_recovery("queued", 3)
             .expect("retry recovery transition"));
+    }
+
+    #[test]
+    fn recovery_record_retains_the_auto_ingest_origin() {
+        let mut store = LocalStore::in_memory().expect("store");
+        let source = identity("v1:auto-card", IdentityStrength::Filesystem);
+        store
+            .begin_ingest_run("automatic", &source, 4, "/source", "/destination")
+            .expect("run");
+        store
+            .connection
+            .execute(
+                "UPDATE ingest_run SET auto_ingest_triggered = 1 WHERE run_id = 'automatic'",
+                [],
+            )
+            .expect("mark automatic");
+        store.reconcile_interrupted_runs().expect("reconcile");
+        assert!(
+            store
+                .recoverable_ingest_run("automatic")
+                .expect("query")
+                .expect("record")
+                .auto_ingest_triggered
+        );
     }
 }

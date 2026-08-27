@@ -3,14 +3,231 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-family: "Segoe UI Variable", "Aptos", ui-sans-serif, system-ui, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+  color-scheme: light;
 }
 
-body { margin: 0; min-width: 320px; min-height: 100vh; }
-button, input, select { font: inherit; }
+.dark {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #f8fafc;
+}
+
+button,
+a,
+input,
+select {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+button,
+input,
+select,
+a {
+  outline-offset: 3px;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+a:focus-visible {
+  outline: 2px solid #0284c7;
+}
+
+.ingest-shell {
+  position: relative;
+  isolation: isolate;
+  overflow-x: hidden;
+  background:
+    radial-gradient(circle at 92% -12%, rgb(14 165 233 / 0.13), transparent 27rem),
+    linear-gradient(135deg, #f8fafc 0%, #f1f5f9 52%, #f8fafc 100%);
+}
+
+.dark .ingest-shell {
+  background:
+    radial-gradient(circle at 88% -8%, rgb(14 165 233 / 0.15), transparent 28rem),
+    linear-gradient(135deg, #020617 0%, #0f172a 52%, #020617 100%);
+}
+
+.ingest-shell::before {
+  position: fixed;
+  z-index: -1;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+  opacity: 0.38;
+  background-image:
+    linear-gradient(rgb(100 116 139 / 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(100 116 139 / 0.07) 1px, transparent 1px);
+  background-size: 2rem 2rem;
+  mask-image: linear-gradient(to bottom, black, transparent 78%);
+}
+
+.ingest-topbar {
+  position: sticky;
+  z-index: 20;
+  top: 0;
+  background: rgb(255 255 255 / 0.78);
+  backdrop-filter: blur(18px);
+}
+
+.dark .ingest-topbar {
+  background: rgb(2 6 23 / 0.72);
+}
+
+.source-rail {
+  position: relative;
+  background: rgb(255 255 255 / 0.58);
+}
+
+.dark .source-rail {
+  background: rgb(15 23 42 / 0.46);
+}
+
+.workspace-content {
+  animation: workspace-arrive 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  scroll-margin-top: 6rem;
+}
+
+.ingest-shell h1,
+.ingest-shell h2,
+.ingest-shell h3 {
+  font-family: "Segoe UI Variable", "Aptos", ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: -0.02em;
+}
+
+.ingest-shell [class*="font-mono"],
+.ingest-shell time,
+.ingest-shell dd {
+  font-variant-numeric: tabular-nums;
+}
+
+.ingest-shell button {
+  cursor: pointer;
+  transition-property:
+    color, background-color, border-color, box-shadow, transform, opacity;
+  transition-duration: 160ms;
+  transition-timing-function: ease;
+}
+
+.ingest-shell button:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+.ingest-shell button:disabled {
+  cursor: not-allowed;
+}
+
+/* Text-only actions read as links in a dense operational workspace. Each
+   secondary action has a visible control boundary, including disabled states. */
+.ingest-shell button[class*="text-blue"]:not([class*="bg-"]),
+.ingest-shell button[class*="text-slate"]:not([class*="bg-"]) {
+  display: inline-flex;
+  min-height: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #bfdbfe;
+  border-radius: 0.5rem;
+  background: #ffffff;
+  padding: 0.375rem 0.75rem;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.08);
+  white-space: nowrap;
+}
+
+.ingest-shell button[class*="text-blue"]:not([class*="bg-"]):not(:disabled):hover,
+.ingest-shell button[class*="text-slate"]:not([class*="bg-"]):not(:disabled):hover {
+  border-color: #0284c7;
+  background: #f0f9ff;
+  box-shadow: 0 4px 12px rgb(14 116 144 / 0.12);
+}
+
+.dark .ingest-shell button[class*="text-blue"]:not([class*="bg-"]),
+.dark .ingest-shell button[class*="text-slate"]:not([class*="bg-"]) {
+  border-color: #334155;
+  background: #0f172a;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.32);
+}
+
+.dark .ingest-shell button[class*="text-blue"]:not([class*="bg-"]):not(:disabled):hover,
+.dark
+  .ingest-shell
+  button[class*="text-slate"]:not([class*="bg-"]):not(:disabled):hover {
+  border-color: #38bdf8;
+  background: #172554;
+}
+
+.source-rail > button {
+  min-height: 2.75rem;
+  border: 1px solid #bfdbfe;
+  background: rgb(255 255 255 / 0.76);
+}
+
+.source-rail > button:not(:disabled):hover {
+  border-color: #bfdbfe;
+  background: rgb(240 249 255 / 0.72);
+}
+
+.dark .source-rail > button {
+  border-color: #334155;
+  background: rgb(15 23 42 / 0.76);
+}
+
+.skip-to-workspace {
+  position: fixed;
+  z-index: 50;
+  top: 0.75rem;
+  left: 0.75rem;
+  transform: translateY(-180%);
+  border-radius: 0.5rem;
+  background: #0c4a6e;
+  padding: 0.625rem 0.875rem;
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 700;
+  transition: transform 160ms ease;
+}
+
+.skip-to-workspace:focus-visible {
+  transform: translateY(0);
+  outline-color: white;
+}
+
+@keyframes workspace-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(0.4rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-content {
+    animation: none;
+  }
+
+  .ingest-shell button,
+  .skip-to-workspace {
+    transition-duration: 0ms;
+  }
+}
+button,
+input,
+select {
+  font: inherit;
+}
 
 @utility status-dot {
   @apply inline-block size-2 shrink-0 rounded-full;

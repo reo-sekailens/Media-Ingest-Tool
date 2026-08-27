@@ -10,6 +10,7 @@ export default tseslint.config(
       "node_modules/",
       "src-tauri/target/",
       ".cargo-target-*/",
+      "**/.cert-target-*/",
       "vite.config.d.ts",
       "vite.config.js",
     ],

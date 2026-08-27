@@ -21,7 +21,30 @@ use std::os::windows::fs::MetadataExt;
 pub const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 pub const MAX_SOURCE_DIRECTORY_DEPTH: usize = 64;
 pub const MAX_SOURCE_FILE_COUNT: usize = 1_000_000;
-pub type CopyProgressCallback = Arc<dyn Fn(u64) + Send + Sync>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CopyProgressStage {
+    Copying,
+    Verifying,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CopyProgress {
+    pub stage: CopyProgressStage,
+    pub bytes: u64,
+    /// One-based ordinal only; raw source paths never leave the native core.
+    pub file_index: usize,
+    pub total_files: usize,
+}
+
+pub type CopyProgressCallback = Arc<dyn Fn(CopyProgress) + Send + Sync>;
+type FileByteProgressCallback = Arc<dyn Fn(CopyProgressStage, u64) + Send + Sync>;
+
+#[derive(Clone)]
+pub struct VerificationProgress {
+    pub callback: CopyProgressCallback,
+    pub file_index: usize,
+    pub total_files: usize,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceEnumerationLimits {
@@ -442,6 +465,28 @@ pub fn verify_existing_copy(
     destination_root: &Path,
     cancel: &AtomicBool,
 ) -> Result<VerifiedCopy, IngestError> {
+    verify_existing_copy_with_progress(
+        source_root,
+        source,
+        destination_relative_path,
+        entry_id,
+        destination_root,
+        cancel,
+        None,
+    )
+}
+
+/// Emits only the independent final-file readback. The source rehash remains
+/// unreported so verification progress stays bounded by the frozen plan size.
+pub fn verify_existing_copy_with_progress(
+    source_root: &Path,
+    source: &PlannedSourceFile,
+    destination_relative_path: &Path,
+    entry_id: &str,
+    destination_root: &Path,
+    cancel: &AtomicBool,
+    progress: Option<VerificationProgress>,
+) -> Result<VerifiedCopy, IngestError> {
     validate_ingest_roots(source_root, destination_root)?;
     validate_source_relative_path(&source.relative_path)?;
     validate_destination_relative_path(destination_relative_path)?;
@@ -459,7 +504,21 @@ pub fn verify_existing_copy(
         return Err(IngestError::VerificationFailed);
     }
     let source_digest = hash_file(&source_path, cancel)?;
-    let destination_digest = hash_file(&final_path, cancel)?;
+    let destination_progress = progress.map(|progress| {
+        let callback = progress.callback;
+        let file_index = progress.file_index;
+        let total_files = progress.total_files;
+        Arc::new(move |stage, bytes| {
+            callback(CopyProgress {
+                stage,
+                bytes,
+                file_index,
+                total_files,
+            });
+        }) as FileByteProgressCallback
+    });
+    let destination_digest =
+        hash_file_with_progress(&final_path, cancel, destination_progress.as_ref())?;
     let after = fs::symlink_metadata(&source_path)?;
     if is_prohibited_source_entry(&after) || source_metadata_changed(&before, &after) {
         return Err(IngestError::SourceChanged);
@@ -484,7 +543,7 @@ fn verified_copy_to_with_progress(
     entry_id: &str,
     destination_root: &Path,
     cancel: &AtomicBool,
-    progress: Option<&CopyProgressCallback>,
+    progress: Option<&FileByteProgressCallback>,
 ) -> Result<VerifiedCopy, IngestError> {
     // This guard must live at the primitive boundary, not only in a planner:
     // callers that bypass a UI flow must never recursively ingest into the
@@ -507,7 +566,12 @@ fn verified_copy_to_with_progress(
     }
     let parent = final_path.parent().ok_or(IngestError::InvalidPath)?;
     fs::create_dir_all(parent)?;
-    let temporary_path = parent.join(format!(".ingest-{}.partial", Uuid::new_v4()));
+    // A stable, entry-scoped checkpoint name lets an explicit recovery own
+    // the interrupted partial without trusting a path supplied by the UI.
+    // Hashing the opaque entry ID keeps arbitrary caller text out of the
+    // filesystem namespace and prevents separator/path traversal tricks.
+    let temporary_path = partial_path(parent, entry_id);
+    discard_recoverable_partial(&temporary_path)?;
     let result = copy_and_verify(
         &source_path,
         &temporary_path,
@@ -546,10 +610,31 @@ fn verified_copy_to_with_progress(
                 final_path,
             })
         }
-        Err(error) => {
-            let _ = fs::remove_file(&temporary_path);
-            Err(error)
+        // Keep the flushed partial for a durable, operator-visible recovery
+        // checkpoint. It is never considered transferred, and the exact
+        // frozen-plan recovery path discards it before a fresh verified copy.
+        Err(error) => Err(error),
+    }
+}
+
+fn partial_path(parent: &Path, entry_id: &str) -> PathBuf {
+    parent.join(format!(
+        ".ingest-{}.partial",
+        blake3::hash(entry_id.as_bytes()).to_hex()
+    ))
+}
+
+/// Removes only the deterministic checkpoint owned by the frozen plan entry.
+/// A symlink, directory, or other replacement is never followed or removed.
+fn discard_recoverable_partial(path: &Path) -> Result<(), IngestError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+            fs::remove_file(path)?;
+            Ok(())
         }
+        Ok(_) => Err(IngestError::InvalidPath),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(IngestError::Io(error)),
     }
 }
 
@@ -665,12 +750,39 @@ pub fn verified_copy_batch_planned_with_progress(
     cancel: Arc<AtomicBool>,
     progress: Option<CopyProgressCallback>,
 ) -> Vec<Result<VerifiedCopy, IngestError>> {
+    let total_files = files.len();
+    verified_copy_batch_planned_with_progress_positions(
+        source_root,
+        files
+            .into_iter()
+            .enumerate()
+            .map(|(index, file)| (index + 1, file))
+            .collect(),
+        total_files,
+        destination_root,
+        limits,
+        cancel,
+        progress,
+    )
+}
+
+/// Like [`verified_copy_batch_planned_with_progress`], but preserves the
+/// original frozen-plan ordinal when a recovery copies only a subset of files.
+pub fn verified_copy_batch_planned_with_progress_positions(
+    source_root: &Path,
+    files: Vec<(usize, PlannedCopyFile)>,
+    total_files: usize,
+    destination_root: &Path,
+    limits: WorkerLimits,
+    cancel: Arc<AtomicBool>,
+    progress: Option<CopyProgressCallback>,
+) -> Vec<Result<VerifiedCopy, IngestError>> {
     if files.is_empty() {
         return Vec::new();
     }
-    let total = files.len();
-    let worker_count = limits.max_workers.clamp(1, total);
-    let (job_tx, job_rx) = mpsc::channel::<(usize, PlannedCopyFile)>();
+    let job_total = files.len();
+    let worker_count = limits.max_workers.clamp(1, job_total);
+    let (job_tx, job_rx) = mpsc::channel::<(usize, usize, PlannedCopyFile)>();
     let (result_tx, result_rx) = mpsc::channel();
     let job_rx = Arc::new(Mutex::new(job_rx));
     let source_root = Arc::new(source_root.to_path_buf());
@@ -685,7 +797,20 @@ pub fn verified_copy_batch_planned_with_progress(
         let progress = progress.clone();
         workers.push(thread::spawn(move || loop {
             let job = job_rx.lock().expect("job queue poisoned").recv();
-            let Ok((index, file)) = job else { break };
+            let Ok((result_index, file_index, file)) = job else {
+                break;
+            };
+            let file_progress = progress.as_ref().map(|progress| {
+                let progress = Arc::clone(progress);
+                Arc::new(move |stage, bytes| {
+                    progress(CopyProgress {
+                        stage,
+                        bytes,
+                        file_index,
+                        total_files,
+                    });
+                }) as FileByteProgressCallback
+            });
             let result = verified_copy_to_with_progress(
                 &source_root,
                 &file.source,
@@ -693,22 +818,22 @@ pub fn verified_copy_batch_planned_with_progress(
                 &file.entry_id,
                 &destination_root,
                 &cancel,
-                progress.as_ref(),
+                file_progress.as_ref(),
             );
-            if result_tx.send((index, result)).is_err() {
+            if result_tx.send((result_index, result)).is_err() {
                 break;
             }
         }));
     }
-    for (index, file) in files.into_iter().enumerate() {
-        let _ = job_tx.send((index, file));
+    for (result_index, (file_index, file)) in files.into_iter().enumerate() {
+        let _ = job_tx.send((result_index, file_index, file));
     }
     drop(job_tx);
     drop(result_tx);
-    let mut outcomes = (0..total)
+    let mut outcomes = (0..job_total)
         .map(|_| None)
         .collect::<Vec<Option<Result<VerifiedCopy, IngestError>>>>();
-    for _ in 0..total {
+    for _ in 0..job_total {
         if let Ok((index, outcome)) = result_rx.recv() {
             outcomes[index] = Some(outcome);
         }
@@ -752,7 +877,7 @@ fn copy_and_verify(
     temporary_path: &Path,
     expected_bytes: u64,
     cancel: &AtomicBool,
-    progress: Option<&CopyProgressCallback>,
+    progress: Option<&FileByteProgressCallback>,
 ) -> Result<(u64, String), IngestError> {
     let mut source = File::open(source_path)?;
     let mut temporary = OpenOptions::new()
@@ -764,6 +889,9 @@ fn copy_and_verify(
     let mut copied = 0_u64;
     loop {
         if cancel.load(Ordering::Relaxed) {
+            // The partial may be reused only as durable diagnostic evidence;
+            // recovery will delete it and copy the frozen entry from scratch.
+            temporary.sync_all()?;
             return Err(IngestError::Cancelled);
         }
         let read = source.read(&mut buffer)?;
@@ -774,7 +902,7 @@ fn copy_and_verify(
         temporary.write_all(&buffer[..read])?;
         copied += read as u64;
         if let Some(progress) = progress {
-            progress(read as u64);
+            progress(CopyProgressStage::Copying, read as u64);
         }
     }
     if copied != expected_bytes {
@@ -782,7 +910,7 @@ fn copy_and_verify(
     }
     temporary.sync_all()?;
     drop(temporary);
-    let destination_digest = hash_file(temporary_path, cancel)?;
+    let destination_digest = hash_file_with_progress(temporary_path, cancel, progress)?;
     let source_digest = source_hasher.finalize().to_hex().to_string();
     if destination_digest != source_digest {
         return Err(IngestError::VerificationFailed);
@@ -791,6 +919,14 @@ fn copy_and_verify(
 }
 
 fn hash_file(path: &Path, cancel: &AtomicBool) -> Result<String, IngestError> {
+    hash_file_with_progress(path, cancel, None)
+}
+
+fn hash_file_with_progress(
+    path: &Path,
+    cancel: &AtomicBool,
+    progress: Option<&FileByteProgressCallback>,
+) -> Result<String, IngestError> {
     let mut file = File::open(path)?;
     let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
     let mut hasher = Hasher::new();
@@ -803,6 +939,9 @@ fn hash_file(path: &Path, cancel: &AtomicBool) -> Result<String, IngestError> {
             break;
         }
         hasher.update(&buffer[..read]);
+        if let Some(progress) = progress {
+            progress(CopyProgressStage::Verifying, read as u64);
+        }
     }
     Ok(hasher.finalize().to_hex().to_string())
 }
@@ -909,16 +1048,43 @@ mod tests {
             &AtomicBool::new(false),
         )
         .expect("initial copy");
-        let recovered = verify_existing_copy(
+        let verification_progress = Arc::new(Mutex::new(Vec::new()));
+        let verification_progress_by_callback = Arc::clone(&verification_progress);
+        let progress: CopyProgressCallback = Arc::new(move |update| {
+            verification_progress_by_callback
+                .lock()
+                .expect("verification progress")
+                .push(update);
+        });
+        let recovered = verify_existing_copy_with_progress(
             &source_root,
             &source,
             Path::new("recovered/clip.mov"),
             "entry-1",
             &destination_root,
             &AtomicBool::new(false),
+            Some(VerificationProgress {
+                callback: progress,
+                file_index: 1,
+                total_files: 1,
+            }),
         )
         .expect("independent recovery hash");
         assert_eq!(recovered.bytes, 12);
+        let verification_progress = verification_progress.lock().expect("verification progress");
+        assert_eq!(
+            verification_progress
+                .iter()
+                .map(|update| update.bytes)
+                .sum::<u64>(),
+            12
+        );
+        assert!(verification_progress.iter().all(|update| {
+            update.stage == CopyProgressStage::Verifying
+                && update.file_index == 1
+                && update.total_files == 1
+        }));
+        drop(verification_progress);
         fs::write(
             destination_root.join("recovered/clip.mov"),
             b"mutated bytes",
@@ -935,6 +1101,49 @@ mod tests {
             ),
             Err(IngestError::VerificationFailed)
         ));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn cancelled_copy_keeps_an_entry_scoped_partial_until_explicit_recovery() {
+        let root = std::env::temp_dir().join(format!("ingest-partial-{}", Uuid::new_v4()));
+        let source_root = root.join("source");
+        let destination_root = root.join("destination");
+        fs::create_dir_all(&source_root).expect("source");
+        fs::write(source_root.join("clip.mov"), b"camera bytes").expect("fixture");
+        let source = enumerate_regular_files(&source_root)
+            .expect("plan")
+            .pop()
+            .expect("source file");
+        let entry_id = "recovery-entry";
+        let cancelled = AtomicBool::new(true);
+        assert!(matches!(
+            verified_copy_to(
+                &source_root,
+                &source,
+                &source.relative_path,
+                entry_id,
+                &destination_root,
+                &cancelled,
+            ),
+            Err(IngestError::Cancelled)
+        ));
+        let partial = partial_path(&destination_root, entry_id);
+        assert!(partial.is_file());
+        assert!(!destination_root.join("clip.mov").exists());
+
+        let recovered = verified_copy_to(
+            &source_root,
+            &source,
+            &source.relative_path,
+            entry_id,
+            &destination_root,
+            &AtomicBool::new(false),
+        )
+        .expect("explicit recovery copy");
+        assert_eq!(recovered.bytes, source.byte_length);
+        assert!(!partial.exists());
+        assert!(destination_root.join("clip.mov").is_file());
         fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -1054,8 +1263,14 @@ mod tests {
             .collect();
         let reported = Arc::new(AtomicU64::new(0));
         let reported_by_callback = Arc::clone(&reported);
-        let progress: CopyProgressCallback = Arc::new(move |bytes| {
-            reported_by_callback.fetch_add(bytes, Ordering::Relaxed);
+        let reported_metadata = Arc::new(Mutex::new(Vec::new()));
+        let reported_metadata_by_callback = Arc::clone(&reported_metadata);
+        let progress: CopyProgressCallback = Arc::new(move |update| {
+            reported_by_callback.fetch_add(update.bytes, Ordering::Relaxed);
+            reported_metadata_by_callback
+                .lock()
+                .expect("progress metadata")
+                .push(update);
         });
         let outcomes = verified_copy_batch_planned_with_progress(
             &source_root,
@@ -1068,6 +1283,32 @@ mod tests {
         assert!(outcomes.iter().all(Result::is_ok));
         assert_eq!(
             reported.load(Ordering::Relaxed),
+            ((first_bytes + second_bytes) * 2) as u64
+        );
+        let metadata = reported_metadata.lock().expect("progress metadata");
+        assert!(!metadata.is_empty());
+        assert!(metadata.iter().all(|update| {
+            update.bytes > 0
+                && update.file_index > 0
+                && update.file_index <= 2
+                && update.total_files == 2
+        }));
+        assert!(metadata.iter().any(|update| update.file_index == 1));
+        assert!(metadata.iter().any(|update| update.file_index == 2));
+        assert_eq!(
+            metadata
+                .iter()
+                .filter(|update| update.stage == CopyProgressStage::Copying)
+                .map(|update| update.bytes)
+                .sum::<u64>(),
+            (first_bytes + second_bytes) as u64
+        );
+        assert_eq!(
+            metadata
+                .iter()
+                .filter(|update| update.stage == CopyProgressStage::Verifying)
+                .map(|update| update.bytes)
+                .sum::<u64>(),
             (first_bytes + second_bytes) as u64
         );
         fs::remove_dir_all(root).expect("cleanup");

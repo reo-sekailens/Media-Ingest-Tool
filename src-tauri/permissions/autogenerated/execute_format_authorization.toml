@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-execute-format-authorization"
+description = "Enables the execute_format_authorization command without any pre-configured scope."
+commands.allow = ["execute_format_authorization"]
+
+[[permission]]
+identifier = "deny-execute-format-authorization"
+description = "Denies the execute_format_authorization command without any pre-configured scope."
+commands.deny = ["execute_format_authorization"]
