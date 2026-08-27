@@ -249,3 +249,22 @@ drive letter and filesystem alongside capacity, free space, and reader slot;
 the selected-source header repeats the observed drive detail. Ingest-history
 states are title-cased for scanability. Drive letters remain mutable mount
 details, never source identity or authorization evidence.
+
+2026-08-27 light-mode contrast repair: all secondary/eyebrow text and input
+placeholders now use #475569 rather than faint slate-400/500, amber notices use
+#92400e, and disabled controls use opaque #475569 text on #e2e8f0 instead of
+low-opacity text. Browser fixture measurement confirms the changed light-mode
+pairs at 6.15:1–7.58:1. This is focused rendered evidence, not formal full-app
+WCAG conformance certification.
+
+2026-08-27 icon-system refinement: the operator shell now uses `lucide-react`
+icons for the ingest mark, media cards, rescan action, verification state,
+warning, and modal close control, replacing textual/glyph substitutes. Rendered
+fixture QA confirms five semantic SVG icons, no legacy glyphs, no horizontal
+overflow, and a clean browser console.
+
+The packaged application icon now uses the same blue hard-drive/download mark.
+`tauri icon` regenerated the Windows `.ico`, macOS `.icns`, PNG, AppX, iOS,
+and Android variants from `src-tauri/icons/media-ingest.svg`; a new x64 NSIS
+installer was built with SHA-256
+`EC2477120B23E37E2490A0A6DA79079F86402D76EF407239F16AC386738D4884`.

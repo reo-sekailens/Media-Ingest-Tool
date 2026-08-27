@@ -238,3 +238,21 @@ For active work, see [Active context](activeContext.md). For evidence requiremen
   space, and reader slot; the source detail repeats that drive detail. History
   outcomes now use title case. Mount letters are explicitly presentation-only
   and do not affect source identity, destination recall, or format authority.
+
+- 2026-08-27 — Repaired light-mode readability: secondary labels and
+  placeholders now use a dark slate token, amber notices use an AA-safe brown,
+  and disabled buttons retain opaque readable text on a distinct disabled
+  surface. Browser fixture contrast checks measured the changed pairs at
+  6.15:1–7.58:1; full formal WCAG certification remains outside this evidence.
+
+- 2026-08-27 — Replaced the operator UI's textual placeholder glyphs with a
+  consistent Lucide icon system for media ingest, removable media, refresh,
+  verification, warnings, and modal dismissal. Browser fixture QA found five
+  semantic SVG icons, no residual placeholder glyphs, no horizontal overflow,
+  and no console errors.
+
+- 2026-08-27 — Replaced the packaged app's default icon set with the blue
+  hard-drive/download mark generated from `src-tauri/icons/media-ingest.svg`.
+  Tauri regenerated Windows, macOS, PNG, AppX, iOS, and Android variants; the
+  rebuilt x64 NSIS installer SHA-256 is
+  `EC2477120B23E37E2490A0A6DA79079F86402D76EF407239F16AC386738D4884`.

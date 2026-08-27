@@ -127,6 +127,35 @@ a:focus-visible {
   cursor: not-allowed;
 }
 
+/* Light mode uses explicit ink tokens instead of Tailwind's faint slate-400
+   and opacity-reduced disabled controls. These remain readable at WCAG AA
+   contrast on the workspace's white, slate-50, and blue-50 surfaces. */
+html:not(.dark) .ingest-shell .text-slate-400,
+html:not(.dark) .ingest-shell .text-slate-500 {
+  color: #475569;
+}
+
+html:not(.dark) .ingest-shell .text-slate-600 {
+  color: #334155;
+}
+
+html:not(.dark) .ingest-shell .text-amber-600 {
+  color: #92400e;
+}
+
+html:not(.dark) .ingest-shell input::placeholder {
+  color: #475569;
+  opacity: 1;
+}
+
+html:not(.dark) .ingest-shell button:disabled {
+  border-color: #cbd5e1;
+  background: #e2e8f0;
+  color: #475569;
+  box-shadow: none;
+  opacity: 1;
+}
+
 /* Text-only actions read as links in a dense operational workspace. Each
    secondary action has a visible control boundary, including disabled states. */
 .ingest-shell button[class*="text-blue"]:not([class*="bg-"]),

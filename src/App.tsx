@@ -1,6 +1,14 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import {
+  CircleCheck,
+  HardDrive,
+  HardDriveDownload,
+  RefreshCw,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
@@ -1548,7 +1556,7 @@ function App() {
             className="grid size-8 place-items-center rounded-lg bg-blue-600 text-sm font-bold text-white shadow-sm"
             aria-hidden="true"
           >
-            M
+            <HardDriveDownload className="size-5" strokeWidth={2.25} />
           </div>
           <div>
             <p className="mb-0.5 text-[10px] font-bold tracking-[0.14em] text-blue-600 dark:text-blue-400">
@@ -1617,7 +1625,7 @@ function App() {
                     className="grid size-8 place-items-center rounded-lg bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300"
                     aria-hidden="true"
                   >
-                    ▣
+                    <HardDrive className="size-4" strokeWidth={2.25} />
                   </span>
                   <span className="grid min-w-0 flex-1 gap-1">
                     <span className="flex items-center justify-between gap-2 text-[13px] text-slate-900 dark:text-slate-100">
@@ -1645,9 +1653,11 @@ function App() {
             onClick={() => void refreshDevices()}
             type="button"
           >
-            <span className="mr-2 text-blue-600 dark:text-blue-400" aria-hidden="true">
-              ＋
-            </span>
+            <RefreshCw
+              aria-hidden="true"
+              className="mr-2 inline-block size-3.5 text-blue-600 dark:text-blue-400"
+              strokeWidth={2.25}
+            />
             Rescan Connected Media
           </button>
         </aside>
@@ -2084,7 +2094,7 @@ function App() {
               className="grid size-9 place-items-center rounded-full bg-blue-600 text-sm font-bold text-white"
               aria-hidden="true"
             >
-              ✓
+              <CircleCheck className="size-5" strokeWidth={2.25} />
             </div>
             <div>
               <p className="mb-1 text-[10px] font-bold tracking-[0.14em] text-blue-700 dark:text-blue-300">
@@ -2350,7 +2360,7 @@ function App() {
                 onClick={() => setIsAutoIngestSetupOpen(false)}
                 type="button"
               >
-                ×
+                <X aria-hidden="true" className="size-4" strokeWidth={2.25} />
               </button>
             </div>
             <label className="mt-6 grid gap-2 text-xs font-medium text-slate-600 dark:text-slate-300">
@@ -2422,7 +2432,11 @@ function App() {
               </label>
             </div>
             <div className="mt-5 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200">
-              <span aria-hidden="true">!</span>
+              <TriangleAlert
+                aria-hidden="true"
+                className="mt-0.5 size-4 shrink-0"
+                strokeWidth={2.25}
+              />
               <p className="m-0">
                 The card marker is mutable continuity evidence, not immutable identity.
                 Managed-card formatting additionally requires a fresh verified ingest, a

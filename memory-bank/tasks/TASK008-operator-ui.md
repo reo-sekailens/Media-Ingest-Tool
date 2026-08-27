@@ -59,6 +59,22 @@ Build a calm, high-information desktop workflow in React and TypeScript with Tai
   title-cased. Drive letters are mutable presentation details and cannot serve
   as source identity, destination-recall, or format-authorization evidence.
 
+- 2026-08-27 — Light mode no longer relies on slate-400/500 or reduced opacity
+  for readable interface text. Secondary labels, input placeholders, warning
+  text, and disabled-button states now use explicit AA-safe foreground and
+  surface tokens. Browser fixture checks measured the changed pairings at
+  6.15:1–7.58:1.
+
+- 2026-08-27 — The application now uses `lucide-react` rather than textual
+  placeholder glyphs for the product mark, device cards, rescan, verification,
+  warning, and close affordances. Browser fixture evidence confirms the icons
+  render without overflow or console errors.
+
+- 2026-08-27 — The packaged desktop icon now matches the app's Lucide-style
+  hard-drive/download media-ingest mark. Tauri generated the platform icon
+  variants from `src-tauri/icons/media-ingest.svg`; the rebuilt Windows NSIS
+  installer carries that icon set.
+
 ## Research sources
 
 - [Tauri IPC model](https://v2.tauri.app/concept/inter-process-communication/)
