@@ -210,6 +210,8 @@ type CardRegistration = {
   destinationPath: string | null;
   sortMode: "original_tree" | "camera_day" | "camera_interval" | null;
   intervalMinutes: number | null;
+  customDirectoryFields: CustomDirectoryField[];
+  destinationDepthOrder: DestinationDepthSegment[];
   markerStatus: "recognized" | "created" | "unavailable";
 };
 
@@ -296,6 +298,18 @@ type SortRequest = {
   intervalMinutes: number | null;
 };
 
+type CustomDirectoryField = {
+  label: string;
+  value: string;
+};
+
+type DestinationDepthSegment =
+  | { kind: "custom_field"; index: number }
+  | { kind: "camera_model" }
+  | { kind: "capture_day" }
+  | { kind: "capture_interval" }
+  | { kind: "original_tree" };
+
 const CUSTOM_INTERVAL_MINUTES_MIN = 1;
 const CUSTOM_INTERVAL_MINUTES_MAX = 1_440;
 
@@ -320,19 +334,72 @@ function resolveSortRequest(
     : null;
 }
 
-function sortDirectoryLevels(request: SortRequest | null): readonly string[] {
+function defaultDestinationDepthOrder(
+  request: SortRequest | null,
+  customDirectoryFields: readonly CustomDirectoryField[],
+): DestinationDepthSegment[] {
+  const customFields = customDirectoryFields.map((_, index) => ({
+    kind: "custom_field" as const,
+    index,
+  }));
   if (!request || request.sortMode === "original_tree") {
-    return ["Original folders", "Filename"];
+    return [...customFields, { kind: "original_tree" }];
   }
   if (request.sortMode === "camera_day") {
-    return ["Camera", "EXIF capture day", "Filename"];
+    return [...customFields, { kind: "camera_model" }, { kind: "capture_day" }];
   }
   return [
-    "Camera",
-    "EXIF capture day",
-    `${request.intervalMinutes}-minute bucket`,
-    "Filename",
+    ...customFields,
+    { kind: "camera_model" },
+    { kind: "capture_day" },
+    { kind: "capture_interval" },
   ];
+}
+
+function destinationDepthSegmentKey(segment: DestinationDepthSegment): string {
+  return segment.kind === "custom_field"
+    ? `${segment.kind}:${segment.index}`
+    : segment.kind;
+}
+
+function normalizeDestinationDepthOrder(
+  requested: readonly DestinationDepthSegment[],
+  available: readonly DestinationDepthSegment[],
+): DestinationDepthSegment[] {
+  const allowed = new Map(
+    available.map((segment) => [destinationDepthSegmentKey(segment), segment]),
+  );
+  const selected = requested.flatMap((segment) => {
+    const key = destinationDepthSegmentKey(segment);
+    const availableSegment = allowed.get(key);
+    if (!availableSegment) return [];
+    allowed.delete(key);
+    return [availableSegment];
+  });
+  return [...selected, ...allowed.values()];
+}
+
+function destinationDepthSegmentLabel(
+  segment: DestinationDepthSegment,
+  customDirectoryFields: readonly CustomDirectoryField[],
+  request: SortRequest | null,
+): string {
+  if (segment.kind === "custom_field") {
+    const field = customDirectoryFields[segment.index];
+    return field?.label.trim() || `Custom field ${segment.index + 1}`;
+  }
+  if (segment.kind === "camera_model") return "Camera model";
+  if (segment.kind === "capture_day") return "EXIF capture day";
+  if (segment.kind === "capture_interval") {
+    return `${request?.intervalMinutes ?? "Custom"}-minute bucket`;
+  }
+  return "Original folders";
+}
+
+function customDirectoryFieldsAreComplete(
+  fields: readonly CustomDirectoryField[],
+): boolean {
+  return fields.every((field) => field.label.trim() && field.value.trim());
 }
 
 function StatusDot({ tone }: { tone: "ready" | "copying" | "verified" }) {
@@ -360,6 +427,15 @@ function App() {
   );
   const [sortPreset, setSortPreset] = useState<SortPreset>("exif_day");
   const [customIntervalMinutes, setCustomIntervalMinutes] = useState("30");
+  const [customDirectoryFields, setCustomDirectoryFields] = useState<
+    readonly CustomDirectoryField[]
+  >([]);
+  const [destinationDepthOrder, setDestinationDepthOrder] = useState<
+    readonly DestinationDepthSegment[]
+  >([]);
+  const [draggedDepthSegmentKey, setDraggedDepthSegmentKey] = useState<string | null>(
+    null,
+  );
   const [calibrationKind, setCalibrationKind] = useState<"sd" | "micro_sd">("sd");
   const [calibrationLabel, setCalibrationLabel] = useState("");
   const [history, setHistory] = useState<readonly IngestHistoryEntry[]>([]);
@@ -422,7 +498,35 @@ function App() {
   );
   const destination = selected ? (destinations[selected.id] ?? "") : "";
   const selectedSortRequest = resolveSortRequest(sortPreset, customIntervalMinutes);
-  const selectedSortLevels = sortDirectoryLevels(selectedSortRequest);
+  const availableDestinationDepthOrder = defaultDestinationDepthOrder(
+    selectedSortRequest,
+    customDirectoryFields,
+  );
+  const selectedDestinationDepthOrder = normalizeDestinationDepthOrder(
+    destinationDepthOrder,
+    availableDestinationDepthOrder,
+  );
+  const selectedSortLevels = selectedDestinationDepthOrder.flatMap((segment) => {
+    if (segment.kind !== "custom_field") {
+      return [
+        destinationDepthSegmentLabel(
+          segment,
+          customDirectoryFields,
+          selectedSortRequest,
+        ),
+      ];
+    }
+    const field = customDirectoryFields[segment.index];
+    return field?.label.trim() && field.value.trim()
+      ? [field.label.trim(), field.value.trim()]
+      : [
+          destinationDepthSegmentLabel(
+            segment,
+            customDirectoryFields,
+            selectedSortRequest,
+          ),
+        ];
+  });
   const selectedInventory = selected ? sourceInventories[selected.id] : undefined;
   const selectedInventoryLabel = selected ? sourceInventoryLabels[selected.id] : "";
   const selectedPlanPreview = selected ? planPreviews[selected.id] : undefined;
@@ -784,6 +888,13 @@ function App() {
       }));
       return;
     }
+    if (!customDirectoryFieldsAreComplete(customDirectoryFields)) {
+      setPlanPreviewLabels((current) => ({
+        ...current,
+        [selected.id]: "Complete or remove each custom folder field before previewing.",
+      }));
+      return;
+    }
     if (!isTauri()) {
       setPlanPreviewLabels((current) => ({
         ...current,
@@ -824,6 +935,8 @@ function App() {
           maxWorkers: 2,
           sortMode: sortRequest.sortMode,
           intervalMinutes: sortRequest.intervalMinutes,
+          customDirectoryFields,
+          destinationDepthOrder: selectedDestinationDepthOrder,
           autoIngestTriggered: false,
         },
       });
@@ -843,7 +956,14 @@ function App() {
         [selected.id]: "The desktop service could not preview this organization.",
       }));
     }
-  }, [customIntervalMinutes, destination, selected, sortPreset]);
+  }, [
+    customDirectoryFields,
+    customIntervalMinutes,
+    destination,
+    selected,
+    selectedDestinationDepthOrder,
+    sortPreset,
+  ]);
   const recallDestination = useCallback(async () => {
     if (!selected || !isTauri()) return;
     try {
@@ -921,6 +1041,12 @@ function App() {
       setRegistrationLabel("Enter a whole custom interval from 1 to 1,440 minutes.");
       return;
     }
+    if (!customDirectoryFieldsAreComplete(customDirectoryFields)) {
+      setRegistrationLabel(
+        "Complete or remove each custom folder field before saving.",
+      );
+      return;
+    }
     if (!isTauri()) {
       setRegistrationLabel(
         "Card registration is available in the desktop application.",
@@ -938,6 +1064,8 @@ function App() {
           destinationPath: destination.trim(),
           sortMode: sortRequest.sortMode,
           intervalMinutes: sortRequest.intervalMinutes,
+          customDirectoryFields,
+          destinationDepthOrder: selectedDestinationDepthOrder,
           autoIngestEnabled,
           autoFormatEnabled,
         },
@@ -955,9 +1083,11 @@ function App() {
   }, [
     autoFormatEnabled,
     autoIngestEnabled,
+    customDirectoryFields,
     customIntervalMinutes,
     destination,
     selected,
+    selectedDestinationDepthOrder,
     sortPreset,
   ]);
   const checkFormatReadiness = useCallback(
@@ -1165,6 +1295,13 @@ function App() {
       }));
       return;
     }
+    if (!customDirectoryFieldsAreComplete(customDirectoryFields)) {
+      setIngestLabels((current) => ({
+        ...current,
+        [selected.id]: "Complete or remove each custom folder field before ingesting.",
+      }));
+      return;
+    }
     if (!isTauri()) {
       setIngestLabels((current) => ({
         ...current,
@@ -1278,6 +1415,8 @@ function App() {
           maxWorkers: 2,
           sortMode: sortRequest.sortMode,
           intervalMinutes: sortRequest.intervalMinutes,
+          customDirectoryFields,
+          destinationDepthOrder: selectedDestinationDepthOrder,
         },
         channel: progress,
       });
@@ -1339,7 +1478,9 @@ function App() {
     trackOperationProgress,
     selected,
     selectedPlanPreview,
+    customDirectoryFields,
     customIntervalMinutes,
+    selectedDestinationDepthOrder,
     sortPreset,
   ]);
   useEffect(() => {
@@ -1435,6 +1576,10 @@ function App() {
                   profile.sortMode === "camera_interval"
                     ? profile.intervalMinutes
                     : null,
+                customDirectoryFields: profile.customDirectoryFields ?? [],
+                destinationDepthOrder: profile.destinationDepthOrder?.length
+                  ? profile.destinationDepthOrder
+                  : undefined,
                 autoIngestTriggered: true,
               },
               channel: progress,
@@ -2011,27 +2156,6 @@ function App() {
                   {selectedDestinationMemoryLabel}
                 </span>
               </div>
-              <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-slate-200 pt-5 dark:border-slate-800">
-                <button
-                  className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300 dark:hover:bg-blue-500/20"
-                  disabled={isCopying || !selected.ingestable}
-                  onClick={openAutoIngestSetup}
-                  type="button"
-                >
-                  Set Up Auto-Ingest
-                </button>
-                <span className="text-xs text-slate-500 dark:text-slate-400">
-                  {autoIngestEnabled
-                    ? "Auto-ingest is selected for this registration."
-                    : "Optional; disabled until you save setup."}
-                </span>
-                <span
-                  className="text-xs text-slate-500 dark:text-slate-400"
-                  aria-live="polite"
-                >
-                  {registrationLabel}
-                </span>
-              </div>
               <fieldset className="mt-6 border-t border-slate-200 py-4 dark:border-slate-800">
                 <legend className="text-xs font-semibold text-slate-700 dark:text-slate-200">
                   Sort from capture metadata
@@ -2093,22 +2217,181 @@ function App() {
                     minutes
                   </label>
                 ) : null}
+                <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-800">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <strong className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                        Custom folders
+                      </strong>
+                      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                        Add details such as Photographer / Ari before the camera model.
+                      </p>
+                    </div>
+                    <button
+                      className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-blue-700 transition hover:border-blue-300 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-blue-300 dark:hover:bg-blue-500/10"
+                      disabled={customDirectoryFields.length >= 8}
+                      onClick={() =>
+                        setCustomDirectoryFields((current) => [
+                          ...current,
+                          { label: "Photographer", value: "" },
+                        ])
+                      }
+                      type="button"
+                    >
+                      Add field
+                    </button>
+                  </div>
+                  {customDirectoryFields.length ? (
+                    <div className="mt-3 grid gap-2">
+                      {customDirectoryFields.map((field, index) => (
+                        <div
+                          className="flex flex-wrap items-center gap-2"
+                          key={`${index}-${field.label}`}
+                        >
+                          <input
+                            aria-label={`Custom folder ${index + 1} label`}
+                            className="min-w-28 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                            onChange={(event) =>
+                              setCustomDirectoryFields((current) =>
+                                current.map((item, itemIndex) =>
+                                  itemIndex === index
+                                    ? { ...item, label: event.target.value }
+                                    : item,
+                                ),
+                              )
+                            }
+                            placeholder="Field name"
+                            value={field.label}
+                          />
+                          <input
+                            aria-label={`Custom folder ${index + 1} value`}
+                            className="min-w-28 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                            onChange={(event) =>
+                              setCustomDirectoryFields((current) =>
+                                current.map((item, itemIndex) =>
+                                  itemIndex === index
+                                    ? { ...item, value: event.target.value }
+                                    : item,
+                                ),
+                              )
+                            }
+                            placeholder="Value"
+                            value={field.value}
+                          />
+                          <button
+                            aria-label={`Remove custom folder ${index + 1}`}
+                            className="rounded-md px-2 py-1 text-xs font-semibold text-slate-500 transition hover:bg-slate-200 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-white"
+                            onClick={() =>
+                              setCustomDirectoryFields((current) =>
+                                current.filter((_, itemIndex) => itemIndex !== index),
+                              )
+                            }
+                            type="button"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
                 <div className="mt-4 grid gap-2 rounded-lg bg-slate-50 p-3 text-xs dark:bg-slate-800/70">
-                  <span className="font-semibold text-slate-700 dark:text-slate-200">
+                  <span
+                    aria-label={`Destination depth ${selectedSortLevels.length} levels`}
+                    className="font-semibold text-slate-700 dark:text-slate-200"
+                    role="status"
+                  >
                     Destination depth · {selectedSortLevels.length} levels
                   </span>
+                  <span className="text-slate-500 dark:text-slate-400">
+                    Drag folder tags to set their destination order. Filename stays
+                    last.
+                  </span>
                   <ol className="flex flex-wrap items-center gap-1.5 text-slate-600 dark:text-slate-300">
-                    {selectedSortLevels.map((level, index) => (
-                      <li
-                        className="flex items-center gap-1.5"
-                        key={`${index}-${level}`}
-                      >
-                        <span className="rounded bg-white px-2 py-1 font-mono text-[11px] shadow-sm dark:bg-slate-900">
-                          {level}
-                        </span>
-                        {index < selectedSortLevels.length - 1 ? <span>/</span> : null}
-                      </li>
-                    ))}
+                    {selectedDestinationDepthOrder.map((segment, index) => {
+                      const key = destinationDepthSegmentKey(segment);
+                      const field =
+                        segment.kind === "custom_field"
+                          ? customDirectoryFields[segment.index]
+                          : undefined;
+                      const customFieldIndex =
+                        segment.kind === "custom_field" ? segment.index : 0;
+                      const label = field
+                        ? `${field.label || `Custom field ${customFieldIndex + 1}`} / ${field.value || "value"}`
+                        : destinationDepthSegmentLabel(
+                            segment,
+                            customDirectoryFields,
+                            selectedSortRequest,
+                          );
+                      return (
+                        <li className="flex items-center gap-1.5" key={key}>
+                          <button
+                            aria-label={`Move ${label} in destination order`}
+                            className={`cursor-grab rounded border bg-white px-2 py-1 font-mono text-[11px] shadow-sm transition active:cursor-grabbing dark:bg-slate-900 ${
+                              draggedDepthSegmentKey === key
+                                ? "border-blue-500 ring-2 ring-blue-500/20"
+                                : "border-slate-200 dark:border-slate-700"
+                            }`}
+                            draggable
+                            onDragEnd={() => setDraggedDepthSegmentKey(null)}
+                            onDragOver={(event) => event.preventDefault()}
+                            onDragStart={(event) => {
+                              event.dataTransfer.effectAllowed = "move";
+                              event.dataTransfer.setData("text/plain", key);
+                              setDraggedDepthSegmentKey(key);
+                            }}
+                            onDrop={(event) => {
+                              event.preventDefault();
+                              const dragged =
+                                event.dataTransfer.getData("text/plain") ||
+                                draggedDepthSegmentKey;
+                              if (!dragged || dragged === key) return;
+                              setDestinationDepthOrder((current) => {
+                                const order = normalizeDestinationDepthOrder(
+                                  current,
+                                  availableDestinationDepthOrder,
+                                );
+                                const from = order.findIndex(
+                                  (item) =>
+                                    destinationDepthSegmentKey(item) === dragged,
+                                );
+                                const to = order.findIndex(
+                                  (item) => destinationDepthSegmentKey(item) === key,
+                                );
+                                if (from < 0 || to < 0) return order;
+                                const next = [...order];
+                                const [moved] = next.splice(from, 1);
+                                next.splice(to, 0, moved);
+                                return next;
+                              });
+                              if (selected) {
+                                setPlanPreviews((current) => {
+                                  const { [selected.id]: _discarded, ...remaining } =
+                                    current;
+                                  return remaining;
+                                });
+                                setPlanPreviewLabels((current) => ({
+                                  ...current,
+                                  [selected.id]: "",
+                                }));
+                              }
+                              setDraggedDepthSegmentKey(null);
+                            }}
+                            type="button"
+                          >
+                            {label}
+                          </button>
+                          {index < selectedDestinationDepthOrder.length ? (
+                            <span>/</span>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                    <li>
+                      <span className="rounded bg-white px-2 py-1 font-mono text-[11px] shadow-sm dark:bg-slate-900">
+                        Filename
+                      </span>
+                    </li>
                   </ol>
                   {!selectedSortRequest ? (
                     <span className="text-amber-700 dark:text-amber-300">
@@ -2175,8 +2458,31 @@ function App() {
                   ))}
                 </div>
               ) : null}
+              <div className="mt-6 grid gap-2 border-t border-slate-200 pt-5 dark:border-slate-800">
+                <button
+                  className="w-full rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-700 shadow-sm transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300 dark:hover:bg-blue-500/20"
+                  disabled={isCopying || !selected.ingestable}
+                  onClick={openAutoIngestSetup}
+                  type="button"
+                >
+                  Set Up Auto-Ingest
+                </button>
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="text-xs text-slate-500 dark:text-slate-400">
+                    {autoIngestEnabled
+                      ? "Auto-ingest is selected for this registration."
+                      : "Optional; disabled until you save setup."}
+                  </span>
+                  <span
+                    className="text-xs text-slate-500 dark:text-slate-400"
+                    aria-live="polite"
+                  >
+                    {registrationLabel}
+                  </span>
+                </div>
+              </div>
               <button
-                className="mt-6 w-full rounded-lg bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-45 dark:text-white"
+                className="mt-3 w-full rounded-lg bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-45 dark:text-white"
                 disabled={isCopying || !selected.ingestable}
                 onClick={() => void startIngest()}
                 type="button"

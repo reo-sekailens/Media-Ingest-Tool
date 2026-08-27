@@ -45,7 +45,10 @@ use crate::local_store::{
     ReaderSlotKind, RecoverableIngestRun, SourceIdentityRecord, VerifiedFileRecord,
 };
 use crate::metadata::inspect;
-use crate::organization::{camera_identity, destination_relative_path, SortMode};
+use crate::organization::{
+    camera_identity, custom_directory_prefix, destination_relative_path_with_order,
+    CustomDirectoryField, DestinationDepthSegment, SortMode,
+};
 
 pub const IPC_CONTRACT_VERSION: u16 = 1;
 static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -255,6 +258,10 @@ pub struct VerifiedIngestRequest {
     pub max_workers: usize,
     pub sort_mode: IngestSortMode,
     pub interval_minutes: Option<u16>,
+    #[serde(default)]
+    pub custom_directory_fields: Vec<CustomDirectoryField>,
+    #[serde(default)]
+    pub destination_depth_order: Option<Vec<DestinationDepthSegment>>,
     /// Set only by the mount-triggered native-app workflow. A registered
     /// auto-format preference never runs after a user-started manual ingest.
     #[serde(default)]
@@ -450,6 +457,10 @@ pub struct CardRegistrationRequest {
     pub destination_path: String,
     pub sort_mode: IngestSortMode,
     pub interval_minutes: Option<u16>,
+    #[serde(default)]
+    pub custom_directory_fields: Vec<CustomDirectoryField>,
+    #[serde(default)]
+    pub destination_depth_order: Option<Vec<DestinationDepthSegment>>,
     pub auto_ingest_enabled: bool,
     pub auto_format_enabled: bool,
 }
@@ -464,6 +475,8 @@ pub struct CardRegistration {
     pub destination_path: Option<String>,
     pub sort_mode: Option<IngestSortMode>,
     pub interval_minutes: Option<u16>,
+    pub custom_directory_fields: Vec<CustomDirectoryField>,
+    pub destination_depth_order: Vec<DestinationDepthSegment>,
     pub marker_status: SourceMarkerStatus,
 }
 
@@ -661,6 +674,25 @@ fn register_card_marker(
             "Choose a valid 1 to 1,440 minute interval before registering this card",
         );
     }
+    if custom_directory_prefix(&request.custom_directory_fields).is_err() {
+        return IpcResponse::failure(
+            IpcErrorCode::InvalidRequest,
+            "Custom fields and destination depth order must form one valid complete path",
+        );
+    }
+    let destination_depth_order = match crate::organization::canonical_destination_depth_order(
+        &sort_mode_for_request(&request.sort_mode, request.interval_minutes),
+        request.custom_directory_fields.len(),
+        request.destination_depth_order.as_deref(),
+    ) {
+        Ok(order) => order,
+        Err(_) => {
+            return IpcResponse::failure(
+                IpcErrorCode::InvalidRequest,
+                "Custom fields and destination depth order must form one valid complete path",
+            )
+        }
+    };
     let snapshot = native_device_snapshot(&state.store, &state.connection_generations);
     let current = snapshot
         .devices
@@ -710,6 +742,8 @@ fn register_card_marker(
             IngestSortMode::CameraInterval => request.interval_minutes,
             _ => None,
         },
+        custom_directory_fields: request.custom_directory_fields,
+        destination_depth_order,
         auto_ingest_enabled: request.auto_ingest_enabled,
         auto_format_enabled: request.auto_ingest_enabled && request.auto_format_enabled,
     };
@@ -722,6 +756,8 @@ fn register_card_marker(
             destination_path: Some(profile.destination_path),
             sort_mode: ingest_sort_mode_from_name(&profile.sort_mode),
             interval_minutes: profile.interval_minutes,
+            custom_directory_fields: profile.custom_directory_fields,
+            destination_depth_order: profile.destination_depth_order,
             marker_status,
         }),
         Err(_) => IpcResponse::failure(
@@ -758,6 +794,8 @@ fn get_auto_ingest_profile(
             destination_path: None,
             sort_mode: None,
             interval_minutes: None,
+            custom_directory_fields: Vec::new(),
+            destination_depth_order: Vec::new(),
             marker_status: SourceMarkerStatus::Unavailable,
         });
     }
@@ -773,6 +811,8 @@ fn get_auto_ingest_profile(
                 destination_path: None,
                 sort_mode: None,
                 interval_minutes: None,
+                custom_directory_fields: Vec::new(),
+                destination_depth_order: Vec::new(),
                 marker_status: SourceMarkerStatus::Unavailable,
             })
         }
@@ -820,6 +860,8 @@ fn get_auto_ingest_profile(
                 destination_path: Some(profile.destination_path),
                 sort_mode: ingest_sort_mode_from_name(&profile.sort_mode),
                 interval_minutes: profile.interval_minutes,
+                custom_directory_fields: profile.custom_directory_fields,
+                destination_depth_order: profile.destination_depth_order,
                 marker_status: SourceMarkerStatus::Recognized,
             })
         }
@@ -831,6 +873,8 @@ fn get_auto_ingest_profile(
             destination_path: None,
             sort_mode: None,
             interval_minutes: None,
+            custom_directory_fields: Vec::new(),
+            destination_depth_order: Vec::new(),
             marker_status: SourceMarkerStatus::Recognized,
         }),
         Err(_) => IpcResponse::failure(
@@ -2375,6 +2419,21 @@ fn prepare_verified_ingest(
     if request.source_medium_key.trim().is_empty() {
         return Err(IngestError::InvalidPath);
     }
+    if matches!(request.sort_mode, IngestSortMode::CameraInterval)
+        && !matches!(request.interval_minutes, Some(1..=1_440))
+    {
+        return Err(IngestError::InvalidPath);
+    }
+    if custom_directory_prefix(&request.custom_directory_fields).is_err()
+        || crate::organization::canonical_destination_depth_order(
+            &sort_mode_for_request(&request.sort_mode, request.interval_minutes),
+            request.custom_directory_fields.len(),
+            request.destination_depth_order.as_deref(),
+        )
+        .is_err()
+    {
+        return Err(IngestError::InvalidPath);
+    }
     let source_root = PathBuf::from(&request.source_root);
     let destination_root = PathBuf::from(&request.destination_root);
     let files = plan_copy_files(
@@ -2434,6 +2493,8 @@ fn prepare_recovery_ingest(
             max_workers,
             sort_mode: IngestSortMode::OriginalTree,
             interval_minutes: None,
+            custom_directory_fields: Vec::new(),
+            destination_depth_order: None,
             auto_ingest_triggered: recovery.auto_ingest_triggered,
         },
         operation_id: recovery.run_id.clone(),
@@ -2999,13 +3060,7 @@ fn plan_copy_files(
     request: &VerifiedIngestRequest,
     operation_id: &str,
 ) -> Result<Vec<PlannedCopyFile>, IngestError> {
-    let mode = match request.sort_mode {
-        IngestSortMode::OriginalTree => SortMode::OriginalTree,
-        IngestSortMode::CameraDay => SortMode::CameraDay,
-        IngestSortMode::CameraInterval => SortMode::CameraInterval {
-            minutes: request.interval_minutes.unwrap_or(60),
-        },
-    };
+    let mode = sort_mode_for_request(&request.sort_mode, request.interval_minutes);
     let mut used = HashSet::new();
     source_files
         .into_iter()
@@ -3017,11 +3072,13 @@ fn plan_copy_files(
                 metadata.body_serial.as_deref(),
                 operation_id,
             );
-            let initial = destination_relative_path(
+            let initial = destination_relative_path_with_order(
                 &source.relative_path.to_string_lossy(),
                 &camera,
                 metadata.capture_time,
                 mode.clone(),
+                &request.custom_directory_fields,
+                request.destination_depth_order.as_deref(),
             )
             .map_err(|_| IngestError::InvalidPath)?;
             let destination_relative_path =
@@ -3033,6 +3090,16 @@ fn plan_copy_files(
             })
         })
         .collect()
+}
+
+fn sort_mode_for_request(sort_mode: &IngestSortMode, interval_minutes: Option<u16>) -> SortMode {
+    match sort_mode {
+        IngestSortMode::OriginalTree => SortMode::OriginalTree,
+        IngestSortMode::CameraDay => SortMode::CameraDay,
+        IngestSortMode::CameraInterval => SortMode::CameraInterval {
+            minutes: interval_minutes.unwrap_or(60),
+        },
+    }
 }
 
 fn unique_destination_path(
@@ -3544,6 +3611,8 @@ mod tests {
             max_workers: 2,
             sort_mode: IngestSortMode::CameraDay,
             interval_minutes: None,
+            custom_directory_fields: Vec::new(),
+            destination_depth_order: None,
             auto_ingest_triggered: true,
         };
         assert!(skips_empty_auto_ingest(&request, 0));
@@ -3681,6 +3750,8 @@ mod tests {
             max_workers: 1,
             sort_mode: IngestSortMode::OriginalTree,
             interval_minutes: None,
+            custom_directory_fields: Vec::new(),
+            destination_depth_order: None,
             auto_ingest_triggered: false,
         };
         assert!(current_source_for_ingest_request(&first, &request).is_some());
@@ -4046,6 +4117,8 @@ mod tests {
                 max_workers: 2,
                 sort_mode: IngestSortMode::OriginalTree,
                 interval_minutes: None,
+                custom_directory_fields: Vec::new(),
+                destination_depth_order: None,
                 auto_ingest_triggered: false,
             },
             "test-operation".into(),
@@ -4149,6 +4222,8 @@ mod tests {
             max_workers: 2,
             sort_mode: IngestSortMode::OriginalTree,
             interval_minutes: None,
+            custom_directory_fields: Vec::new(),
+            destination_depth_order: None,
             auto_ingest_triggered: false,
         };
         let initial = execute_prepared_ingest(
@@ -4203,6 +4278,8 @@ mod tests {
                 max_workers: 2,
                 sort_mode: IngestSortMode::OriginalTree,
                 interval_minutes: None,
+                custom_directory_fields: Vec::new(),
+                destination_depth_order: None,
                 auto_ingest_triggered: false,
             },
             "10000000-0000-4000-8000-000000000001".into(),
@@ -4245,6 +4322,8 @@ mod tests {
                 max_workers: 2,
                 sort_mode: IngestSortMode::OriginalTree,
                 interval_minutes: None,
+                custom_directory_fields: Vec::new(),
+                destination_depth_order: None,
                 auto_ingest_triggered: false,
             },
             "10000000-0000-4000-8000-000000000002".into(),
@@ -4283,6 +4362,8 @@ mod tests {
                 max_workers: 2,
                 sort_mode: IngestSortMode::OriginalTree,
                 interval_minutes: None,
+                custom_directory_fields: Vec::new(),
+                destination_depth_order: None,
                 auto_ingest_triggered: false,
             };
             let prepared = prepare_verified_ingest(
@@ -4313,6 +4394,8 @@ mod tests {
                 max_workers: 2,
                 sort_mode: IngestSortMode::OriginalTree,
                 interval_minutes: None,
+                custom_directory_fields: Vec::new(),
+                destination_depth_order: None,
                 auto_ingest_triggered: false,
             };
             let prepared = prepare_verified_ingest(
@@ -4365,6 +4448,8 @@ mod tests {
                 max_workers: 1,
                 sort_mode: IngestSortMode::OriginalTree,
                 interval_minutes: None,
+                custom_directory_fields: Vec::new(),
+                destination_depth_order: None,
                 auto_ingest_triggered: false,
             },
             "cancelled-operation".into(),
@@ -4397,6 +4482,14 @@ mod tests {
             max_workers: 2,
             sort_mode: IngestSortMode::CameraDay,
             interval_minutes: None,
+            custom_directory_fields: vec![
+                CustomDirectoryField::new("Photographer", "Ari").expect("field")
+            ],
+            destination_depth_order: Some(vec![
+                DestinationDepthSegment::CameraModel,
+                DestinationDepthSegment::CustomField { index: 0 },
+                DestinationDepthSegment::CaptureDay,
+            ]),
             auto_ingest_triggered: false,
         };
         let plan = plan_copy_files(
@@ -4417,6 +4510,218 @@ mod tests {
                 .and_then(OsStr::to_str)
                 .is_some_and(|name| name.starts_with("clip__"))
         }));
+        assert!(plan.iter().all(|file| {
+            let components = file
+                .destination_relative_path
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let camera = components
+                .iter()
+                .position(|component| component.contains("__"));
+            let photographer = components
+                .iter()
+                .position(|component| component == "Photographer");
+            let photographer_value = components.iter().position(|component| component == "Ari");
+            camera.is_some_and(|camera| {
+                photographer.is_some_and(|field| {
+                    photographer_value.is_some_and(|value| camera < field && field < value)
+                })
+            })
+        }));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn reordered_custom_organization_is_copied_and_verified() {
+        let root = std::env::temp_dir().join(format!("organization-copy-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::create_dir_all(source.join("DCIM")).expect("source");
+        std::fs::write(source.join("DCIM/clip.mov"), b"organized camera bytes").expect("fixture");
+        let prepared = prepare_verified_ingest(
+            VerifiedIngestRequest {
+                operation_id: None,
+                source_root: source.to_string_lossy().into(),
+                destination_root: destination.to_string_lossy().into(),
+                source_medium_key: "session:organization-fixture".into(),
+                source_identity_confidence: IdentityConfidence::Unresolved,
+                source_generation: 1,
+                max_workers: 1,
+                sort_mode: IngestSortMode::CameraInterval,
+                interval_minutes: Some(30),
+                custom_directory_fields: vec![
+                    CustomDirectoryField::new("Photographer", "Ari").expect("field")
+                ],
+                destination_depth_order: Some(vec![
+                    DestinationDepthSegment::CustomField { index: 0 },
+                    DestinationDepthSegment::CaptureDay,
+                    DestinationDepthSegment::CameraModel,
+                    DestinationDepthSegment::CaptureInterval,
+                ]),
+                auto_ingest_triggered: false,
+            },
+            "organization-copy-operation".into(),
+        )
+        .expect("prepare");
+        let planned_path = prepared.files[0].destination_relative_path.clone();
+        let components = planned_path
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(&components[..2], ["Photographer", "Ari"]);
+        assert!(components[2].starts_with("20"));
+        assert!(components[3].contains("__"));
+        assert!(components[4].contains("_"));
+        assert_eq!(components[5], "clip.mov");
+
+        let completed = execute_prepared_ingest(
+            prepared,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
+        )
+        .expect("copy and verify");
+        assert_eq!(completed.summary.copied_files, 1);
+        assert_eq!(completed.copies[0].destination_relative_path, planned_path);
+        assert_eq!(
+            std::fs::read(destination.join(&planned_path)).expect("copied media"),
+            b"organized camera bytes"
+        );
+        assert!(destination
+            .join(".media-ingest-receipts")
+            .join(completed.summary.receipt_name)
+            .exists());
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    #[ignore = "set MEDIA_INGEST_ORGANIZATION_HW_ROOT to a controlled fixture card root"]
+    fn hardware_organization_fixture_uses_exif_and_verifies_copies() {
+        let source = PathBuf::from(
+            std::env::var("MEDIA_INGEST_ORGANIZATION_HW_ROOT")
+                .expect("controlled hardware fixture root"),
+        );
+        let fixture = source.join("DCIM").join("A001.JPG");
+        let metadata = inspect(&fixture);
+        assert_eq!(metadata.make, "Sony");
+        assert_eq!(metadata.model, "FX3");
+        assert_eq!(
+            metadata.capture_time_source,
+            crate::metadata::CaptureTimeSource::ExifOriginalWithOffset
+        );
+        assert_eq!(
+            metadata.capture_time.offset().local_minus_utc(),
+            8 * 60 * 60
+        );
+
+        let destination = std::env::temp_dir().join(format!(
+            "media-ingest-organization-hardware-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let prepared = prepare_verified_ingest(
+            VerifiedIngestRequest {
+                operation_id: None,
+                source_root: source.to_string_lossy().into(),
+                destination_root: destination.to_string_lossy().into(),
+                source_medium_key: "hardware:organization-fixture".into(),
+                source_identity_confidence: IdentityConfidence::HardwareStable,
+                source_generation: 1,
+                max_workers: 1,
+                sort_mode: IngestSortMode::CameraInterval,
+                interval_minutes: Some(30),
+                custom_directory_fields: vec![
+                    CustomDirectoryField::new("Photographer", "Ari").expect("field")
+                ],
+                destination_depth_order: Some(vec![
+                    DestinationDepthSegment::CustomField { index: 0 },
+                    DestinationDepthSegment::CameraModel,
+                    DestinationDepthSegment::CaptureDay,
+                    DestinationDepthSegment::CaptureInterval,
+                ]),
+                auto_ingest_triggered: false,
+            },
+            "hardware-organization-fixture".into(),
+        )
+        .expect("plan");
+        assert_eq!(prepared.files.len(), 3);
+        let completed = execute_prepared_ingest(
+            prepared,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
+        )
+        .expect("verified copy");
+        assert_eq!(completed.summary.copied_files, 3);
+        for copy in &completed.copies {
+            let components = copy
+                .destination_relative_path
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(&components[..2], ["Photographer", "Ari"]);
+            assert!(components[2].starts_with("FX3__"));
+            assert_eq!(components[3], "2026-08-28");
+            assert!(matches!(
+                components[4].as_str(),
+                "10-00_+0800" | "10-30_+0800" | "11-00_+0800"
+            ));
+            assert!(copy.final_path.is_file());
+        }
+        assert!(destination
+            .join(".media-ingest-receipts")
+            .join(completed.summary.receipt_name)
+            .exists());
+        std::fs::remove_dir_all(destination).expect("cleanup destination");
+    }
+
+    #[test]
+    fn prepared_ingest_rejects_incomplete_organization_settings() {
+        let root =
+            std::env::temp_dir().join(format!("organization-invalid-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::write(source.join("clip.mov"), b"fixture").expect("fixture");
+        let invalid_interval = VerifiedIngestRequest {
+            operation_id: None,
+            source_root: source.to_string_lossy().into(),
+            destination_root: root.join("destination").to_string_lossy().into(),
+            source_medium_key: "session:organization-fixture".into(),
+            source_identity_confidence: IdentityConfidence::Unresolved,
+            source_generation: 1,
+            max_workers: 1,
+            sort_mode: IngestSortMode::CameraInterval,
+            interval_minutes: None,
+            custom_directory_fields: Vec::new(),
+            destination_depth_order: None,
+            auto_ingest_triggered: false,
+        };
+        assert!(matches!(
+            prepare_verified_ingest(invalid_interval, "invalid-interval".into()),
+            Err(IngestError::InvalidPath)
+        ));
+
+        let incomplete_order = VerifiedIngestRequest {
+            sort_mode: IngestSortMode::CameraDay,
+            interval_minutes: None,
+            destination_depth_order: Some(Vec::new()),
+            ..VerifiedIngestRequest {
+                operation_id: None,
+                source_root: source.to_string_lossy().into(),
+                destination_root: root.join("destination").to_string_lossy().into(),
+                source_medium_key: "session:organization-fixture".into(),
+                source_identity_confidence: IdentityConfidence::Unresolved,
+                source_generation: 1,
+                max_workers: 1,
+                sort_mode: IngestSortMode::OriginalTree,
+                interval_minutes: None,
+                custom_directory_fields: Vec::new(),
+                destination_depth_order: None,
+                auto_ingest_triggered: false,
+            }
+        };
+        assert!(matches!(
+            prepare_verified_ingest(incomplete_order, "incomplete-order".into()),
+            Err(IngestError::InvalidPath)
+        ));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -4469,6 +4774,8 @@ mod tests {
             max_workers: 2,
             sort_mode: IngestSortMode::CameraDay,
             interval_minutes: None,
+            custom_directory_fields: Vec::new(),
+            destination_depth_order: None,
             auto_ingest_triggered: false,
         };
         let first = prepare_verified_ingest(

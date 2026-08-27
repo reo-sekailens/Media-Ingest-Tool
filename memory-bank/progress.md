@@ -264,6 +264,12 @@ For active work, see [Active context](activeContext.md). For evidence requiremen
   unit verification cover the behavior; a native preview against camera media
   is still pending.
 
+- 2026-08-28 — Changed camera folder presentation to model-first while
+  retaining the identity suffix for collision safety. Added up to eight
+  validated custom folder fields (for example, `Photographer` / `Ari`) before
+  the camera/time hierarchy, persisted them in marker auto-ingest profiles,
+  and covered their UI, planner, and local-store paths with tests.
+
 - 2026-08-27 — Restored the operator typography hierarchy by replacing the
   global `font: inherit` reset with font-family inheritance only, preserving
   Tailwind's intended utility sizes. The rendered fixture now establishes a
@@ -335,3 +341,30 @@ Tool` product title beside the app icon, removing redundant local-workflow
   `MacOsAuthorizedHelperProvider` that cannot resolve, format, or validate a
   target until a signed Disk Arbitration/IOMedia-bound helper is implemented.
   This is a safety correction, not macOS quick-format certification.
+
+- 2026-08-28 — Made destination-depth folder tags draggable. The exact
+  camera/custom/time/original-tree order is now validated as a complete
+  compatible permutation, executed by the planner with the filename last, and
+  retained in marker-backed auto-ingest registration. Dragging discards any
+  stale organization preview. TypeScript, fixture UI, Rust unit, and build
+  checks pass; real-card native preview evidence is still outstanding.
+
+- 2026-08-28 — Moved Set Up Auto-Ingest to immediately above Start Verified
+  Ingest, after all destination and sorting settings. UI coverage asserts the
+  workflow order.
+
+- 2026-08-28 — Matched Set Up Auto-Ingest to the full-width Start Verified
+  Ingest action geometry and retained its status as subordinate text.
+
+- 2026-08-28 — Closed an organization compatibility gap: a legacy profile
+  without saved depth order no longer sends an invalid empty order to
+  auto-ingest; registration stores its canonical complete order. Added a
+  filesystem integration test for custom-field/reordered interval copy,
+  verification, and receipt creation, plus request-boundary rejection tests.
+
+- 2026-08-28 — Mounted three controlled EXIF JPEG fixtures on the removable
+  M: card in `MIT_ORGANIZATION_FIXTURE` and ran the env-gated native
+  organization qualification. It read Sony FX3/time metadata, created the
+  requested reordered hierarchy, independently verified all copies, and
+  sealed a receipt in a temporary destination that was then removed. No source
+  media or marker was deleted.

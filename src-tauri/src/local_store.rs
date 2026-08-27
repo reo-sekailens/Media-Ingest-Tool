@@ -1,11 +1,12 @@
 //! Rust-owned durable configuration for trusted ingest state.
 
 use crate::identity::IdentityStrength;
+use crate::organization::{CustomDirectoryField, DestinationDepthSegment};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Serialize;
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 13;
 
 pub struct LocalStore {
     connection: Connection,
@@ -90,6 +91,8 @@ pub struct MarkerIngestProfile {
     /// The interval selected for `camera_interval`; no guessed value is used
     /// when a registered card mounts again.
     pub interval_minutes: Option<u16>,
+    pub custom_directory_fields: Vec<CustomDirectoryField>,
+    pub destination_depth_order: Vec<DestinationDepthSegment>,
     pub auto_ingest_enabled: bool,
     pub auto_format_enabled: bool,
 }
@@ -186,6 +189,8 @@ impl LocalStore {
               destination_path TEXT NOT NULL,
               sort_mode TEXT NOT NULL CHECK(sort_mode IN ('original_tree', 'camera_day', 'camera_interval')),
               interval_minutes INTEGER CHECK(interval_minutes IS NULL OR (interval_minutes >= 1 AND interval_minutes <= 1440)),
+              custom_directory_fields_json TEXT NOT NULL DEFAULT '[]',
+              destination_depth_order_json TEXT NOT NULL DEFAULT '[]',
               auto_ingest_enabled INTEGER NOT NULL CHECK(auto_ingest_enabled IN (0, 1)),
               auto_format_enabled INTEGER NOT NULL DEFAULT 0 CHECK(auto_format_enabled IN (0, 1)),
               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -210,6 +215,8 @@ impl LocalStore {
             INSERT OR IGNORE INTO schema_migration(version) VALUES (9);
             INSERT OR IGNORE INTO schema_migration(version) VALUES (10);
             INSERT OR IGNORE INTO schema_migration(version) VALUES (11);
+            INSERT OR IGNORE INTO schema_migration(version) VALUES (12);
+            INSERT OR IGNORE INTO schema_migration(version) VALUES (13);
             ",
         )?;
         self.add_column_if_missing("ingest_run", "source_root", "TEXT")?;
@@ -235,7 +242,17 @@ impl LocalStore {
             "interval_minutes",
             "INTEGER CHECK(interval_minutes IS NULL OR (interval_minutes >= 1 AND interval_minutes <= 1440))",
         )?;
-        debug_assert_eq!(SCHEMA_VERSION, 11);
+        self.add_column_if_missing(
+            "marker_ingest_profile",
+            "custom_directory_fields_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        self.add_column_if_missing(
+            "marker_ingest_profile",
+            "destination_depth_order_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        debug_assert_eq!(SCHEMA_VERSION, 13);
         Ok(())
     }
 
@@ -307,14 +324,16 @@ impl LocalStore {
         profile: &MarkerIngestProfile,
     ) -> rusqlite::Result<()> {
         self.connection.execute(
-            "INSERT INTO marker_ingest_profile(marker_token, destination_path, sort_mode, interval_minutes, auto_ingest_enabled, auto_format_enabled)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO marker_ingest_profile(marker_token, destination_path, sort_mode, interval_minutes, custom_directory_fields_json, destination_depth_order_json, auto_ingest_enabled, auto_format_enabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(marker_token) DO UPDATE SET destination_path = excluded.destination_path,
                  sort_mode = excluded.sort_mode, interval_minutes = excluded.interval_minutes,
+                 custom_directory_fields_json = excluded.custom_directory_fields_json,
+                 destination_depth_order_json = excluded.destination_depth_order_json,
                  auto_ingest_enabled = excluded.auto_ingest_enabled,
                  auto_format_enabled = excluded.auto_format_enabled,
                  updated_at = CURRENT_TIMESTAMP",
-            params![profile.marker_token, profile.destination_path, profile.sort_mode, profile.interval_minutes, profile.auto_ingest_enabled, profile.auto_format_enabled],
+            params![profile.marker_token, profile.destination_path, profile.sort_mode, profile.interval_minutes, serde_json::to_string(&profile.custom_directory_fields).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&profile.destination_depth_order).unwrap_or_else(|_| "[]".into()), profile.auto_ingest_enabled, profile.auto_format_enabled],
         )?;
         Ok(())
     }
@@ -325,7 +344,7 @@ impl LocalStore {
     ) -> rusqlite::Result<Option<MarkerIngestProfile>> {
         self.connection
             .query_row(
-                "SELECT marker_token, destination_path, sort_mode, interval_minutes, auto_ingest_enabled, auto_format_enabled
+                "SELECT marker_token, destination_path, sort_mode, interval_minutes, custom_directory_fields_json, destination_depth_order_json, auto_ingest_enabled, auto_format_enabled
              FROM marker_ingest_profile WHERE marker_token = ?1",
                 params![marker_token],
                 |row| {
@@ -334,8 +353,10 @@ impl LocalStore {
                         destination_path: row.get(1)?,
                         sort_mode: row.get(2)?,
                         interval_minutes: row.get(3)?,
-                        auto_ingest_enabled: row.get(4)?,
-                        auto_format_enabled: row.get(5)?,
+                        custom_directory_fields: serde_json::from_str::<Vec<CustomDirectoryField>>(&row.get::<_, String>(4)?).unwrap_or_default(),
+                        destination_depth_order: serde_json::from_str::<Vec<DestinationDepthSegment>>(&row.get::<_, String>(5)?).unwrap_or_default(),
+                        auto_ingest_enabled: row.get(6)?,
+                        auto_format_enabled: row.get(7)?,
                     })
                 },
             )
@@ -1223,6 +1244,15 @@ mod tests {
             destination_path: "D:/Ingest/A".into(),
             sort_mode: "camera_interval".into(),
             interval_minutes: Some(1),
+            custom_directory_fields: vec![
+                CustomDirectoryField::new("Photographer", "Ari").expect("field")
+            ],
+            destination_depth_order: vec![
+                DestinationDepthSegment::CustomField { index: 0 },
+                DestinationDepthSegment::CameraModel,
+                DestinationDepthSegment::CaptureInterval,
+                DestinationDepthSegment::CaptureDay,
+            ],
             auto_ingest_enabled: true,
             auto_format_enabled: false,
         };

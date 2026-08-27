@@ -121,10 +121,14 @@ test("keeps organization previews inside the desktop boundary", () => {
 test("selects EXIF sort tags and shows the resulting destination depth", () => {
   render(<App />);
 
-  expect(screen.getByText("Destination depth · 3 levels")).toBeInTheDocument();
+  expect(
+    screen.getByRole("status", { name: "Destination depth 2 levels" }),
+  ).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Custom interval" }));
   expect(screen.getByLabelText("Custom interval minutes")).toHaveValue(30);
-  expect(screen.getByText("Destination depth · 4 levels")).toBeInTheDocument();
+  expect(
+    screen.getByRole("status", { name: "Destination depth 3 levels" }),
+  ).toBeInTheDocument();
   expect(screen.getByText("30-minute bucket")).toBeInTheDocument();
 
   fireEvent.change(screen.getByLabelText("Custom interval minutes"), {
@@ -133,12 +137,60 @@ test("selects EXIF sort tags and shows the resulting destination depth", () => {
   expect(screen.getByText("45-minute bucket")).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "Original tree" }));
-  expect(screen.getByText("Destination depth · 2 levels")).toBeInTheDocument();
+  expect(
+    screen.getByRole("status", { name: "Destination depth 1 levels" }),
+  ).toBeInTheDocument();
+});
+
+test("adds a custom folder before the camera model", () => {
+  render(<App />);
+
+  fireEvent.click(screen.getByRole("button", { name: "Add field" }));
+  fireEvent.change(screen.getByLabelText("Custom folder 1 value"), {
+    target: { value: "Ari" },
+  });
+
+  expect(
+    screen.getByRole("status", { name: "Destination depth 4 levels" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Photographer / Ari")).toBeInTheDocument();
+  expect(screen.getByText("Camera model")).toBeInTheDocument();
+});
+
+test("reorders destination depth with draggable folder tags", () => {
+  render(<App />);
+  const camera = screen.getByRole("button", {
+    name: "Move Camera model in destination order",
+  });
+  const day = screen.getByRole("button", {
+    name: "Move EXIF capture day in destination order",
+  });
+  const dataTransfer = {
+    effectAllowed: "",
+    setData: vi.fn(),
+    getData: vi.fn(() => "camera_model"),
+  };
+
+  fireEvent.dragStart(camera, { dataTransfer });
+  fireEvent.drop(day, { dataTransfer });
+
+  expect(
+    screen
+      .getAllByRole("button", { name: /move .* in destination order/i })
+      .map((button) => button.textContent),
+  ).toEqual(["EXIF capture day", "Camera model"]);
 });
 
 test("opens the auto-ingest setup modal", () => {
   render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: /set up auto-ingest/i }));
+  const autoIngest = screen.getByRole("button", { name: /set up auto-ingest/i });
+  const startIngest = screen.getByRole("button", { name: /start verified ingest/i });
+  expect(autoIngest).toHaveClass("w-full", "px-4", "py-3", "text-sm");
+  expect(startIngest).toHaveClass("w-full", "px-4", "py-3", "text-sm");
+  expect(screen.getAllByRole("button").indexOf(autoIngest)).toBeLessThan(
+    screen.getAllByRole("button").indexOf(startIngest),
+  );
+  fireEvent.click(autoIngest);
   expect(
     screen.getByRole("dialog", { name: /set up auto-ingest/i }),
   ).toBeInTheDocument();
@@ -422,6 +474,7 @@ test("starts one registered auto-ingest per observed connection generation", asy
           destinationRoot: "D:\\Ingest\\Registered",
           sortMode: "camera_interval",
           intervalMinutes: 1,
+          destinationDepthOrder: undefined,
           autoIngestTriggered: true,
         }),
       }),

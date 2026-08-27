@@ -169,6 +169,41 @@ Ship conservative defaults, expose advanced overrides only after tests, and stor
   Rust unit tests and browser-fixture UI tests pass; native EXIF preview
   evidence remains outstanding.
 
+- 2026-08-28 — Model-first camera directory labels retain a short stable
+  identity suffix to avoid merging identical models. Up to eight validated
+  operator custom fields are projected as label/value folders before the
+  camera/time layout and persist in the marker-backed auto-ingest profile.
+  Local unit and fixture evidence is complete; real-media native preview
+  evidence remains outstanding.
+
+- 2026-08-28 — Operators can drag the destination-depth folder tags to set
+  the precise order of camera, custom field, time, and original-tree folders.
+  The backend rejects duplicate, missing, or sort-incompatible segments and
+  always appends the filename last. The chosen order is included in previews,
+  manual/auto ingest, and marker-backed registration. Fixture UI and Rust unit
+  tests pass; a real-card native preview remains outstanding.
+
+- 2026-08-28 — Positioned auto-ingest registration immediately before manual
+  ingest after all destination-organization settings, preventing setup from
+  preceding the profile it records.
+
+- 2026-08-28 — Set Up Auto-Ingest now matches Start Verified Ingest's
+  full-width action size, making the adjacent choices equally clear.
+
+- 2026-08-28 — Organization is covered through a real temporary filesystem
+  copy: a reordered custom-field/capture-day/camera/interval layout copies to
+  the exact planned path, verifies bytes, and seals a receipt. Legacy marker
+  profiles without a saved drag order use the canonical layout; new profiles
+  persist that complete validated order. Invalid interval or incomplete order
+  inputs are rejected before planning.
+
+- 2026-08-28 — Hardware-backed organization qualification passed with three
+  controlled EXIF JPEGs mounted under `M:\MIT_ORGANIZATION_FIXTURE`. The
+  native test confirmed Sony FX3 and +08:00 capture EXIF, the explicit custom
+  folder/camera/day/30-minute ordering, verified destination bytes, and a
+  sealed receipt. It writes only a temporary destination and leaves source
+  fixture files and the card marker intact.
+
 - [ ] Windows, macOS, and Linux enumerate and copy every regular file in the fixture tree without following any link/reparse/mount escape.
 - [ ] Two connected cards ingest concurrently, while configured source/destination permits and the memory cap are never exceeded.
 - [ ] A slow verifier/destination applies measurable backpressure; queued tasks and memory remain bounded for a million-file synthetic plan.

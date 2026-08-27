@@ -279,6 +279,16 @@ existing explicit filesystem-time fallback when no usable embedded timestamp
 is available. Browser fixture evidence and Rust unit tests cover this; a
 native metadata-preview run on real media remains unverified.
 
+2026-08-28 camera-model and custom-folder organization: camera directories
+now lead with the embedded camera model (falling back to make, then an explicit
+unknown label) while retaining the short identity suffix that prevents two
+same-model bodies from merging. Operators can add up to eight validated custom
+folder fields such as `Photographer` / `Ari`; each field adds its label and
+value before the camera/time tree. The exact fields are included in preview,
+manual ingest, and the marker-backed auto-ingest profile, where they are
+persisted as local JSON. Fixture UI and Rust unit coverage pass; a native
+preview or ingest using real EXIF camera metadata is still outstanding.
+
 2026-08-28 macOS source support: mounted external-volume discovery now uses
 the absolute `/usr/sbin/diskutil` binary and structured XML property-list
 responses. It rejects internal/read-only/non-mounted entries, captures
@@ -361,3 +371,33 @@ Windows installers: NSIS `Media Ingest Tool_0.1.0_x64-setup.exe` (3,216,487
 bytes, SHA-256 `D7F4DEC2D55F3BFF7EBFD1433FBD64402B0A58BB352FFBADD7FA28D999734CF1`)
 and MSI `Media Ingest Tool_0.1.0_x64_en-US.msi` (4,591,616 bytes, SHA-256
 `B53CC017A0879AA5838479DD262DDA889FEA2CDC5B283BE8C121D1575738E8E6`).
+
+2026-08-28 destination-depth ordering: each destination folder tag is now
+draggable, with filename fixed last. The selected complete permutation is sent
+to preview, manual ingest, and auto-ingest, validated by the Rust planner, and
+persisted in marker-backed auto-ingest profiles. Reordering clears a stale
+preview before it can be used. Fixture and unit coverage is complete; a real
+media-card path preview remains required for native evidence.
+
+2026-08-28 auto-ingest placement: setup now follows the destination and
+sorting controls and sits immediately above Start Verified Ingest, so an
+operator configures the completed profile before enabling a future
+mount-triggered run.
+
+2026-08-28 action sizing: Set Up Auto-Ingest now shares Start Verified
+Ingest's full-width, 14 px action geometry, while its configuration state is
+kept as supporting text underneath.
+
+2026-08-28 organization certification: legacy marker profiles with no saved
+drag order now omit that optional input so the native canonical layout is used,
+while newly registered profiles persist the complete canonical order. Native
+planning rejects missing interval/order segments before copy. A filesystem
+integration test verifies a reordered custom interval layout reaches the exact
+destination, has its bytes independently verified, and emits a receipt.
+
+2026-08-28 mounted organization qualification: controlled JPEGs under
+`M:\MIT_ORGANIZATION_FIXTURE` supplied Sony FX3 and timezone-aware capture
+EXIF. The env-gated hardware test read that removable source, projected the
+dragged custom/camera/day/30-minute layout, copied it to a temporary
+destination, independently verified all bytes, wrote a receipt, and removed
+only that temporary destination. The source marker and fixture files remain.
