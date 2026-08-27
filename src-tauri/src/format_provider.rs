@@ -80,7 +80,7 @@ pub fn current_platform_provider() -> Box<dyn PlatformFormatProvider> {
 
 #[cfg(target_os = "macos")]
 pub fn current_platform_provider() -> Box<dyn PlatformFormatProvider> {
-    Box::new(macos::MacOsDiskutilProvider)
+    Box::new(macos::MacOsAuthorizedHelperProvider)
 }
 
 #[cfg(target_os = "linux")]

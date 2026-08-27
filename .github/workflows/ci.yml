@@ -54,3 +54,22 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
+
+  macos-package:
+    name: macOS unsigned package
+    needs: [frontend, rust]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run tauri build -- --bundles app,dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-unsigned-bundle
+          path: src-tauri/target/release/bundle
+          if-no-files-found: error

@@ -63,9 +63,12 @@ pub fn destination_relative_path(
             .join(capture.format("%Y-%m-%d").to_string())
             .join(original.file_name().ok_or("missing filename")?)),
         SortMode::CameraInterval { minutes } => {
-            if minutes == 0 || 1440 % minutes != 0 {
-                return Err("interval must divide one day");
+            if !(1..=1_440).contains(&minutes) {
+                return Err("interval must be from 1 to 1,440 minutes");
             }
+            // Each local capture day remains its own namespace. This makes an
+            // arbitrary interval deterministic even when it does not divide
+            // a day: its final bucket simply ends at the next local midnight.
             let minute = capture.hour() as u16 * 60 + capture.minute() as u16;
             let bucket = minute / minutes * minutes;
             let offset = capture.format("%:z").to_string().replace(':', "");
@@ -238,6 +241,43 @@ mod tests {
         )
         .expect("path");
         assert!(path.to_string_lossy().contains("01-00_-0800"));
+    }
+
+    #[test]
+    fn arbitrary_interval_is_anchored_at_local_midnight() {
+        let capture = Utc
+            .with_ymd_and_hms(2026, 8, 23, 23, 47, 0)
+            .unwrap()
+            .with_timezone(&FixedOffset::east_opt(0).unwrap());
+        let camera = camera_identity("Sony", "FX3", Some("A-001"), "run");
+        let path = destination_relative_path(
+            "PRIVATE/CLIP.MOV",
+            &camera,
+            capture,
+            SortMode::CameraInterval { minutes: 37 },
+        )
+        .expect("path");
+        assert!(path.to_string_lossy().contains("2026-08-23\\23-26_+0000"));
+    }
+
+    #[test]
+    fn interval_rejects_only_values_outside_the_supported_range() {
+        let capture = Utc
+            .with_ymd_and_hms(2026, 8, 23, 0, 0, 0)
+            .unwrap()
+            .with_timezone(&FixedOffset::east_opt(0).unwrap());
+        let camera = camera_identity("Sony", "FX3", Some("A-001"), "run");
+        for minutes in [0, 1_441] {
+            assert_eq!(
+                destination_relative_path(
+                    "PRIVATE/CLIP.MOV",
+                    &camera,
+                    capture,
+                    SortMode::CameraInterval { minutes },
+                ),
+                Err("interval must be from 1 to 1,440 minutes")
+            );
+        }
     }
 
     #[test]

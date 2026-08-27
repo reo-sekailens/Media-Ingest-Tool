@@ -256,3 +256,82 @@ For active work, see [Active context](activeContext.md). For evidence requiremen
   Tauri regenerated Windows, macOS, PNG, AppX, iOS, and Android variants; the
   rebuilt x64 NSIS installer SHA-256 is
   `EC2477120B23E37E2490A0A6DA79079F86402D76EF407239F16AC386738D4884`.
+
+- 2026-08-28 — Reworked capture-time organization into selectable EXIF day,
+  EXIF hour, custom-minute, and original-tree tags. The selected rule now
+  displays its destination folder depth, and the Rust planner accepts any
+  1–1,440 minute interval anchored at local midnight. Fixture UI and Rust
+  unit verification cover the behavior; a native preview against camera media
+  is still pending.
+
+- 2026-08-27 — Restored the operator typography hierarchy by replacing the
+  global `font: inherit` reset with font-family inheritance only, preserving
+  Tailwind's intended utility sizes. The rendered fixture now establishes a
+  36 px device title, 18 px section titles, 16 px status values, 11 px labels,
+  12 px secondary actions, and a 14 px primary action without overflow.
+
+- 2026-08-27 — Simplified the application header to a single `Media Ingest
+Tool` product title beside the app icon, removing redundant local-workflow
+  and station text. Browser fixture checks confirm the new heading and clean
+  console output.
+
+- 2026-08-27 — Removed the duplicated separator below the selected-device
+  summary. The header no longer draws a bottom border; the status strip owns
+  the single 1 px top divider, confirmed in the browser fixture.
+
+- 2026-08-27 — Added an expandable fixed aggregate-ingest dock. It calculates
+  total percent and ETA from real active-operation bytes/rates, shows
+  per-operation stage/file/progress/log entries when expanded, and reserves
+  scrolling space for both dock heights. TypeScript, 13 UI tests, and the
+  production build pass; populated native-transfer visual QA remains pending.
+
+- 2026-08-27 — Refined the aggregate dock to appear only during active or
+  queued native ingest work. It is compact when collapsed and is positioned in
+  the main desktop workspace, clear of the source-media rail.
+
+- 2026-08-27 — Removed the redundant non-functional `Change` control from
+  Destination & Organization; the directory field and `Choose...` folder action
+  are the functional destination controls.
+
+- 2026-08-27 — Strengthened dark-mode destination-field contrast and border
+  treatment so editable paths do not appear disabled.
+
+- 2026-08-27 — Disabled destination recall/save affordances for cards without
+  stable hardware identity, matching the backend's session-only safety boundary
+  and explaining the reason with tooltips and status text.
+
+- 2026-08-27 — Built unsigned x64 Windows NSIS and MSI installers from the
+  current workspace. NSIS SHA-256:
+  `D7F4DEC2D55F3BFF7EBFD1433FBD64402B0A58BB352FFBADD7FA28D999734CF1`; MSI
+  SHA-256: `B53CC017A0879AA5838479DD262DDA889FEA2CDC5B283BE8C121D1575738E8E6`.
+
+- 2026-08-28 — Added source-level macOS removable-volume discovery using the
+  absolute `/usr/sbin/diskutil` executable and structured XML plist responses;
+  no localized display text is parsed. It filters to mounted, writable,
+  external/removable volumes, preserves volume UUID/capacity/filesystem and
+  non-authoritative reader presentation evidence, and feeds the existing
+  cross-platform snapshot reconciliation worker. The macOS safe-eject adapter
+  accepts only a current canonical `/Volumes/...` root from the native command
+  boundary and invokes `diskutil eject -plist`; it cannot receive device IDs
+  or commands from the webview. Rust host tests pass. An attempted
+  `aarch64-apple-darwin` check correctly remains blocked before compilation by
+  the lack of Apple C compiler/SDK support on this Windows host. Apple
+  documentation confirms that certification still needs Disk Arbitration
+  lifecycle callbacks/reconciliation and a signed privileged-helper design for
+  formatting, plus real macOS hardware and distribution/notarization evidence.
+
+- 2026-08-28 — Added a platform-specific Tauri macOS configuration that sets
+  the minimum version to 13.0 for the planned `SMAppService` model and enables
+  hardened runtime. The GitHub Actions macOS job now builds an unsigned `.app`
+  and DMG and uploads the bundle for review. The source contains a macOS-only
+  structured-plist unit test for required removable-volume evidence. These are
+  CI/source gates only until a GitHub macOS runner completes them and a signed,
+  notarized package is installed and tested on macOS hardware.
+
+- 2026-08-28 — Removed the macOS direct `diskutil eraseVolume` provider after
+  documentation review found that it could report failure after a successful
+  destructive format: it retained the old mount root while renaming the volume
+  to `MEDIA_INGEST`. The replacement is a tested fail-closed
+  `MacOsAuthorizedHelperProvider` that cannot resolve, format, or validate a
+  target until a signed Disk Arbitration/IOMedia-bound helper is implemented.
+  This is a safety correction, not macOS quick-format certification.

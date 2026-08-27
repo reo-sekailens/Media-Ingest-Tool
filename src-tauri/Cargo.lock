@@ -2138,6 +2138,7 @@ dependencies = [
  "fs2",
  "hex",
  "nom-exif",
+ "plist",
  "rusqlite",
  "serde",
  "serde_json",

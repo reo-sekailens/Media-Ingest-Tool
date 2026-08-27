@@ -268,3 +268,96 @@ The packaged application icon now uses the same blue hard-drive/download mark.
 and Android variants from `src-tauri/icons/media-ingest.svg`; a new x64 NSIS
 installer was built with SHA-256
 `EC2477120B23E37E2490A0A6DA79079F86402D76EF407239F16AC386738D4884`.
+
+2026-08-28 organization controls: capture-time sorting is now exposed as
+imageboard-like selectable tags for EXIF day, EXIF hour, an operator-entered
+1–1,440 minute interval, or the original tree. The UI displays the exact
+destination directory depth and components before planning. The planner now
+accepts arbitrary bounded minute intervals (for example, 30 or 37 minutes),
+anchored at local capture-day midnight; metadata remains EXIF-first with the
+existing explicit filesystem-time fallback when no usable embedded timestamp
+is available. Browser fixture evidence and Rust unit tests cover this; a
+native metadata-preview run on real media remains unverified.
+
+2026-08-28 macOS source support: mounted external-volume discovery now uses
+the absolute `/usr/sbin/diskutil` binary and structured XML property-list
+responses. It rejects internal/read-only/non-mounted entries, captures
+filesystem UUID/capacity and non-authoritative reader presentation evidence,
+and feeds the existing one-second snapshot reconciliation worker. Safe eject
+now permits only a canonical `/Volumes/...` mount that was revalidated by the
+Rust command boundary before it invokes the same absolute binary.
+
+This is partial macOS support, not full platform certification. Apple's Disk
+Arbitration documentation requires event reconciliation because callback order
+may vary, and safe formatting still requires Disk Arbitration target binding
+plus a signed least-privilege helper/SMAppService. No macOS host, SDK, card,
+reader, authorization, signed package, or notarization credential is available
+here. Cross-compilation to `aarch64-apple-darwin` installed the Rust target but
+correctly stopped when `objc2-exception-helper` required an Apple-compatible C
+compiler/SDK that this Windows host does not have.
+
+2026-08-28 macOS packaging gate: `tauri.macos.conf.json` declares the macOS
+13 minimum required for the planned `SMAppService` helper model and enables
+the hardened runtime. CI now has a macOS-host job that runs the existing
+frontend/Rust matrix and produces an unsigned `.app`/DMG artifact. This gate
+does not substitute for Developer ID signing, notarization, clean-Mac install,
+or hardware workflow evidence.
+
+2026-08-28 macOS format correction: the source-level direct `diskutil
+eraseVolume` provider has been removed and replaced with an explicit
+`UnsupportedPlatform` authorized-helper boundary. The former command could
+successfully destructively erase a volume, then wait for the old mount path
+after the new `MEDIA_INGEST` label caused a different remount path, leaving no
+safe marker/receipt completion. The replacement makes no destructive call until
+a signed helper proves a current whole-medium Disk Arbitration/IOMedia binding,
+performs privileged work after one opaque authorization, and returns the new
+validated mount. This restores fail-closed behavior but does not constitute
+macOS quick-format support.
+
+2026-08-27 typography hierarchy repair: a global `font: inherit` rule had
+silently reset all button/input/select size utilities to 16 px, making controls
+compete with section titles. It now inherits only the font family. The rendered
+operator scale is selected-device title 36 px, section title 18 px, status
+value 16 px, label 11 px, secondary action 12 px, and primary action 14 px;
+the browser fixture has no horizontal overflow or console errors.
+
+2026-08-27 header simplification: the app mark is now followed only by the
+single product name, `Media Ingest Tool`; the redundant local-workflow label
+and `Ingest Station` title were removed. Browser fixture checks confirm the
+new heading is present, the old heading is absent, and the console is clean.
+
+2026-08-27 divider cleanup: the selected-device header no longer draws its own
+bottom border; the status strip supplies the sole divider. Browser inspection
+confirms a 0 px header bottom border and a single 1 px status-strip top border.
+
+2026-08-27 aggregate ingest dock: active native operations now retain their
+stage, byte totals, file position, measured rate, and a bounded stage/file log
+in the webview. A fixed bottom dock aggregates known bytes into total percent
+and ETA; it expands to per-operation progress and logs. The shell reserves
+6.5rem while collapsed and up to 48vh while expanded so scrollable content is
+never hidden behind the dock. TypeScript, 13 UI tests, and the production build
+pass; a live native multi-operation run is still needed for populated dock QA.
+
+2026-08-27 dock refinement: Live View is intentionally present only while one
+or more native ingests are active or queued, avoiding idle workspace clutter.
+It is compact when collapsed and, on desktop, centered within the main
+workspace to the right of the 19rem source rail rather than spanning it.
+
+2026-08-27 destination cleanup: removed the non-functional `Change` control
+from Destination & Organization. The named destination field and native folder
+chooser remain the only actions for changing the ingest destination.
+
+2026-08-27 destination affordance: the editable destination field now uses a
+contrasting active surface and stronger boundary in dark mode, rather than the
+same muted panel surface that made it appear disabled.
+
+2026-08-27 destination-memory alignment: destination recall and save controls
+now disable whenever native discovery cannot provide stable hardware card
+identity. Their tooltip and visible session-only status explain that this is a
+safety boundary, not an unavailable destination-field editor.
+
+2026-08-27 installer build: the current workspace produced unsigned x64
+Windows installers: NSIS `Media Ingest Tool_0.1.0_x64-setup.exe` (3,216,487
+bytes, SHA-256 `D7F4DEC2D55F3BFF7EBFD1433FBD64402B0A58BB352FFBADD7FA28D999734CF1`)
+and MSI `Media Ingest Tool_0.1.0_x64_en-US.msi` (4,591,616 bytes, SHA-256
+`B53CC017A0879AA5838479DD262DDA889FEA2CDC5B283BE8C121D1575738E8E6`).

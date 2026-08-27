@@ -160,6 +160,15 @@ Ship conservative defaults, expose advanced overrides only after tests, and stor
 
 ## Acceptance criteria
 
+### Recent implementation evidence
+
+- 2026-08-28 — The operator UI exposes capture-time sorting as selectable
+  EXIF day, EXIF hour, custom-minute, and original-tree tags, including an
+  explicit destination-depth display. The planner accepts arbitrary bounded
+  intervals from 1 to 1,440 minutes, anchored to local capture-day midnight.
+  Rust unit tests and browser-fixture UI tests pass; native EXIF preview
+  evidence remains outstanding.
+
 - [ ] Windows, macOS, and Linux enumerate and copy every regular file in the fixture tree without following any link/reparse/mount escape.
 - [ ] Two connected cards ingest concurrently, while configured source/destination permits and the memory cap are never exceeded.
 - [ ] A slow verifier/destination applies measurable backpressure; queued tasks and memory remain bounded for a million-file synthetic plan.

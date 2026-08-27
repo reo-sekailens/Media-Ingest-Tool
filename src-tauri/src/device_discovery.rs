@@ -812,7 +812,185 @@ mod platform {
     }
 }
 
-#[cfg(all(not(windows), not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::*;
+    use fs2::{available_space, total_space};
+    use plist::Value;
+    use std::collections::HashSet;
+    use std::path::Path;
+    use std::process::Command;
+
+    const DISKUTIL: &str = "/usr/sbin/diskutil";
+
+    /// Enumerate only mounted, external/removable volumes. `diskutil -plist`
+    /// emits a machine-readable property list, so no localized terminal text
+    /// is interpreted. The snapshot worker reconciles this native view every
+    /// second; event-driven Disk Arbitration remains required for certification.
+    pub fn enumerate_removable_volumes() -> Vec<DiscoveredVolume> {
+        let Ok(output) = Command::new(DISKUTIL).args(["list", "-plist"]).output() else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        let Ok(root) = Value::from_reader_xml(output.stdout.as_slice()) else {
+            return Vec::new();
+        };
+        let mut seen_mounts = HashSet::new();
+        disk_entries(&root)
+            .filter_map(|entry| macos_volume(entry, &mut seen_mounts))
+            .collect()
+    }
+
+    fn disk_entries(value: &Value) -> Box<dyn Iterator<Item = &plist::Dictionary> + '_> {
+        match value {
+            Value::Dictionary(dictionary) => {
+                let direct = std::iter::once(dictionary);
+                let nested = dictionary
+                    .get("AllDisksAndPartitions")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .flat_map(disk_entries);
+                Box::new(direct.chain(nested))
+            }
+            _ => Box::new(std::iter::empty()),
+        }
+    }
+
+    fn macos_volume(
+        entry: &plist::Dictionary,
+        seen_mounts: &mut HashSet<String>,
+    ) -> Option<DiscoveredVolume> {
+        let mount = entry.get("MountPoint")?.as_string()?.to_string();
+        if !seen_mounts.insert(mount.clone()) {
+            return None;
+        }
+        let identifier = entry.get("DeviceIdentifier")?.as_string()?;
+        let info = disk_info(identifier)?;
+        if !info.removable || info.internal || info.read_only || !Path::new(&mount).is_dir() {
+            return None;
+        }
+        let mount_path = Path::new(&mount);
+        let mut volume = volume_from_platform_parts(
+            PlatformIdentitySources {
+                filesystem: "macos.volume-uuid",
+                session: "macos.mount-location",
+            },
+            mount.clone(),
+            info.name.unwrap_or_else(|| identifier.to_string()),
+            info.filesystem,
+            info.volume_uuid,
+            total_space(mount_path).ok().or(info.capacity_bytes),
+            available_space(mount_path).ok(),
+        );
+        volume.marker_token = crate::storage_marker::read_marker(mount_path)
+            .ok()
+            .flatten();
+        volume.reader_topology = Some(ReaderTopology {
+            vendor: info.vendor,
+            product: info.model,
+            reader_serial: None,
+            physical_device_number: None,
+            logical_unit: None,
+            reported_vpd_identifiers: Vec::new(),
+            reported_sd_cid: None,
+        });
+        Some(volume)
+    }
+
+    struct DiskInfo {
+        name: Option<String>,
+        filesystem: Option<String>,
+        volume_uuid: Option<String>,
+        capacity_bytes: Option<u64>,
+        removable: bool,
+        internal: bool,
+        read_only: bool,
+        vendor: Option<String>,
+        model: Option<String>,
+    }
+
+    fn disk_info(identifier: &str) -> Option<DiskInfo> {
+        if !identifier.starts_with("disk")
+            || !identifier.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return None;
+        }
+        let output = Command::new(DISKUTIL)
+            .args(["info", "-plist", identifier])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let dictionary = Value::from_reader_xml(output.stdout.as_slice())
+            .ok()?
+            .into_dictionary()?;
+        disk_info_from_plist(&dictionary)
+    }
+
+    fn disk_info_from_plist(dictionary: &plist::Dictionary) -> Option<DiskInfo> {
+        let capacity_bytes = integer(dictionary, "TotalSize")?;
+        Some(DiskInfo {
+            name: string(&dictionary, "VolumeName"),
+            filesystem: string(&dictionary, "FilesystemType"),
+            volume_uuid: string(&dictionary, "VolumeUUID"),
+            capacity_bytes: Some(capacity_bytes),
+            removable: boolean(&dictionary, "RemovableMediaOrExternal"),
+            internal: boolean(&dictionary, "Internal"),
+            read_only: boolean(&dictionary, "ReadOnlyVolume"),
+            vendor: string(&dictionary, "DeviceVendor"),
+            model: string(&dictionary, "MediaName").or_else(|| string(&dictionary, "DeviceModel")),
+        })
+    }
+
+    fn string(dictionary: &plist::Dictionary, key: &str) -> Option<String> {
+        dictionary.get(key)?.as_string().map(str::to_owned)
+    }
+    fn integer(dictionary: &plist::Dictionary, key: &str) -> Option<u64> {
+        dictionary.get(key)?.as_unsigned_integer()
+    }
+    fn boolean(dictionary: &plist::Dictionary, key: &str) -> bool {
+        dictionary
+            .get(key)
+            .and_then(Value::as_boolean)
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn parses_only_complete_structured_removable_volume_evidence() {
+            let value = Value::from_reader_xml(
+                br#"<?xml version="1.0"?><plist version="1.0"><dict>
+                    <key>TotalSize</key><integer>1024</integer>
+                    <key>RemovableMediaOrExternal</key><true/>
+                    <key>Internal</key><false/><key>ReadOnlyVolume</key><false/>
+                    <key>VolumeUUID</key><string>F00D</string>
+                    <key>FilesystemType</key><string>exfat</string>
+                </dict></plist>"#,
+            )
+            .expect("fixture plist")
+            .into_dictionary()
+            .expect("fixture dictionary");
+            let info = disk_info_from_plist(&value).expect("required capacity");
+            assert_eq!(info.capacity_bytes, Some(1024));
+            assert!(info.removable);
+            assert!(!info.internal);
+            assert!(!info.read_only);
+            assert_eq!(info.filesystem.as_deref(), Some("exfat"));
+
+            value.remove("TotalSize");
+            assert!(disk_info_from_plist(&value).is_none());
+        }
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
 mod platform {
     use super::*;
 

@@ -1,6 +1,6 @@
 # TASK011 — Packaging, release, and supported-platform contract
 
-- **Status:** in progress — local unsigned Windows x64 NSIS packaging completed on 2026-08-23. The setup executable and native executable hashes are recorded in progress evidence; signing, clean-machine install/start proof, macOS/Linux packages, SBOM, and hardware-certification-dependent release support remain pending.
+- **Status:** in progress — local unsigned Windows x64 NSIS packaging completed on 2026-08-23. macOS now declares a 13.0 minimum and hardened runtime in its Tauri platform configuration, and CI has an unsigned macOS `.app`/DMG build artifact gate. Signing, clean-machine install/start proof, executed macOS CI, notarization, SBOM, and hardware-certification-dependent release support remain pending.
 - **Depends on:** TASK001, TASK009, TASK010
 
 ## Objective
@@ -40,3 +40,5 @@ Ship reproducible native desktop artifacts and publish an honest support contrac
 - [Tauri Windows code signing](https://v2.tauri.app/distribute/sign/windows/)
 - [Tauri macOS code signing and notarization](https://v2.tauri.app/distribute/sign/macos/)
 - [Tauri Linux package signing](https://v2.tauri.app/distribute/sign/linux/)
+- [Tauri macOS application bundle](https://v2.tauri.app/distribute/macos-application-bundle/)
+- [Apple macOS notarization requirements](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)

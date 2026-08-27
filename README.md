@@ -4,7 +4,7 @@ Media Ingest Tool is a local-first desktop application for safely ingesting remo
 
 The local foundation now includes conservative Windows removable-volume discovery, controlled SanDisk reader-slot calibration, bounded verified ingest, BLAKE3 destination readback, SQLite manifest/receipt sealing, camera/time destination sorting, and cooperative cancellation. These are local automated results, not a claim of hardware certification.
 
-Physical immutable-card identity through every reader, hotplug/reconnect recovery, macOS/Linux adapters, a real quick-format provider, safe eject, and signed release artifacts remain incomplete or uncertified. The Format action is intentionally disabled until those exact-device safety gates exist.
+Physical immutable-card identity through every reader, event-driven macOS lifecycle, privileged macOS formatting, hotplug/reconnect recovery, Linux hardware proof, and signed release artifacts remain incomplete or uncertified. The Format action is intentionally disabled until those exact-device safety gates exist.
 
 ## Development
 
@@ -18,9 +18,9 @@ npm run tauri dev
 
 The app has no broad frontend filesystem or shell access. Native functionality is exposed only through narrow typed Rust commands.
 
-## AI-ready workflow
+## Evidence-oriented project workflow
 
-The repository includes an evidence-oriented memory bank and common AI-agent entry points:
+The repository includes an evidence-oriented memory bank and project entry points:
 
 - Start with [AGENTS.md](AGENTS.md) for the operating rules.
 - Read [memory-bank/README.md](memory-bank/README.md) for the maintained project context.
@@ -31,7 +31,7 @@ The repository includes an evidence-oriented memory bank and common AI-agent ent
 
 Before implementation begins, complete the unknowns in `memory-bank/projectbrief.md` and `memory-bank/techContext.md`. Keep facts evidence-based: a build, local test, packaged artifact, and live deployment are distinct kinds of proof.
 
-Validate the AI documentation at any time with:
+Validate the project documentation at any time with:
 
 ```powershell
 pwsh -NoProfile -File scripts/verify-memory-bank.ps1

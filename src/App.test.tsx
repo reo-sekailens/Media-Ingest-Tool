@@ -118,6 +118,24 @@ test("keeps organization previews inside the desktop boundary", () => {
   ).toBeInTheDocument();
 });
 
+test("selects EXIF sort tags and shows the resulting destination depth", () => {
+  render(<App />);
+
+  expect(screen.getByText("Destination depth · 3 levels")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Custom interval" }));
+  expect(screen.getByLabelText("Custom interval minutes")).toHaveValue(30);
+  expect(screen.getByText("Destination depth · 4 levels")).toBeInTheDocument();
+  expect(screen.getByText("30-minute bucket")).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText("Custom interval minutes"), {
+    target: { value: "45" },
+  });
+  expect(screen.getByText("45-minute bucket")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Original tree" }));
+  expect(screen.getByText("Destination depth · 2 levels")).toBeInTheDocument();
+});
+
 test("opens the auto-ingest setup modal", () => {
   render(<App />);
   fireEvent.click(screen.getByRole("button", { name: /set up auto-ingest/i }));

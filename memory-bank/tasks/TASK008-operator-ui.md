@@ -75,6 +75,39 @@ Build a calm, high-information desktop workflow in React and TypeScript with Tai
   variants from `src-tauri/icons/media-ingest.svg`; the rebuilt Windows NSIS
   installer carries that icon set.
 
+- 2026-08-27 — Corrected the full operator text hierarchy. A global font
+  shorthand had forced all controls to 16 px; controls now retain their own
+  utility sizes and the rendered hierarchy explicitly separates selected-device
+  title (36 px), section titles (18 px), status values (16 px), labels (11 px),
+  secondary actions (12 px), and primary action (14 px).
+
+- 2026-08-27 — Simplified the header identity to one `Media Ingest Tool` title
+  beside the app mark, removing redundant secondary product naming.
+
+- 2026-08-27 — Simplified the selected-device/status transition to one visual
+  divider by removing the header's redundant bottom border.
+
+- 2026-08-27 — Added a fixed, expandable aggregate-ingest dock fed by real
+  active-operation progress: total progress/ETA while collapsed and
+  per-operation stage, file position, bytes, rate, and bounded event logs when
+  expanded. The workspace adds bottom scroll clearance for both dock states.
+
+- 2026-08-27 — Refined the aggregate dock to appear only for active or queued
+  work, use a compact collapsed summary, and align to the desktop main
+  workspace instead of crossing the source-media rail.
+
+- 2026-08-27 — Removed the redundant non-functional destination `Change`
+  control, leaving the labelled directory field and folder chooser as the
+  accessible functional controls.
+
+- 2026-08-27 — Distinguished editable destination inputs from disabled dark
+  panels with a darker active field surface, stronger border, and focus-ready
+  visual treatment.
+
+- 2026-08-27 — Matched destination-memory controls to native identity
+  confidence: recall/save remain unavailable for session-only media, with a
+  visible explanation and tooltip, while direct destination editing is retained.
+
 ## Research sources
 
 - [Tauri IPC model](https://v2.tauri.app/concept/inter-process-communication/)

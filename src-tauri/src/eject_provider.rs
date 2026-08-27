@@ -298,7 +298,35 @@ mod platform {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::SafeEjectError;
+    use std::path::Path;
+    use std::process::Command;
+
+    const DISKUTIL: &str = "/usr/sbin/diskutil";
+
+    pub(super) fn safe_eject(mount_root: &Path) -> Result<(), SafeEjectError> {
+        let canonical = mount_root
+            .canonicalize()
+            .map_err(|_| SafeEjectError::EjectFailed)?;
+        if !canonical.is_dir() || !canonical.starts_with("/Volumes/") {
+            return Err(SafeEjectError::DeviceNotEjectable);
+        }
+        let output = Command::new(DISKUTIL)
+            .args(["eject", "-plist"])
+            .arg(&canonical)
+            .output()
+            .map_err(|_| SafeEjectError::EjectFailed)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(SafeEjectError::DeviceBusy(None))
+        }
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 mod platform {
     use super::SafeEjectError;
     use std::path::Path;

@@ -3,8 +3,11 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   CircleCheck,
+  ChevronDown,
+  ChevronUp,
   HardDrive,
   HardDriveDownload,
+  ListTodo,
   RefreshCw,
   TriangleAlert,
   X,
@@ -270,6 +273,14 @@ type ProgressUpdate = {
 type ActiveOperation = {
   operationId: string;
   cancelling: boolean;
+  state: ProgressUpdate["state"];
+  transferredBytes: number;
+  totalBytes: number | null;
+  currentFileIndex: number | null;
+  totalFiles: number | null;
+  startedAt: number;
+  bytesPerSecond: number;
+  logs: readonly string[];
 };
 
 type CompletedRun = {
@@ -278,8 +289,51 @@ type CompletedRun = {
   sourceIdentityConfidence: string;
 };
 
-type SortPreset =
-  "original_tree" | "camera_day" | "camera_every_hour" | "camera_every_minute";
+type SortPreset = "original_tree" | "exif_day" | "exif_hour" | "exif_custom";
+
+type SortRequest = {
+  sortMode: "original_tree" | "camera_day" | "camera_interval";
+  intervalMinutes: number | null;
+};
+
+const CUSTOM_INTERVAL_MINUTES_MIN = 1;
+const CUSTOM_INTERVAL_MINUTES_MAX = 1_440;
+
+function resolveSortRequest(
+  preset: SortPreset,
+  customIntervalMinutes: string,
+): SortRequest | null {
+  if (preset === "original_tree") {
+    return { sortMode: "original_tree", intervalMinutes: null };
+  }
+  if (preset === "exif_day") {
+    return { sortMode: "camera_day", intervalMinutes: null };
+  }
+  if (preset === "exif_hour") {
+    return { sortMode: "camera_interval", intervalMinutes: 60 };
+  }
+  const interval = Number(customIntervalMinutes);
+  return Number.isInteger(interval) &&
+    interval >= CUSTOM_INTERVAL_MINUTES_MIN &&
+    interval <= CUSTOM_INTERVAL_MINUTES_MAX
+    ? { sortMode: "camera_interval", intervalMinutes: interval }
+    : null;
+}
+
+function sortDirectoryLevels(request: SortRequest | null): readonly string[] {
+  if (!request || request.sortMode === "original_tree") {
+    return ["Original folders", "Filename"];
+  }
+  if (request.sortMode === "camera_day") {
+    return ["Camera", "EXIF capture day", "Filename"];
+  }
+  return [
+    "Camera",
+    "EXIF capture day",
+    `${request.intervalMinutes}-minute bucket`,
+    "Filename",
+  ];
+}
 
 function StatusDot({ tone }: { tone: "ready" | "copying" | "verified" }) {
   return <span aria-hidden="true" className={`status-dot status-dot--${tone}`} />;
@@ -300,10 +354,12 @@ function App() {
   const [activeOperations, setActiveOperations] = useState<
     Readonly<Record<string, ActiveOperation>>
   >({});
+  const [isIngestDockOpen, setIsIngestDockOpen] = useState(false);
   const [ingestLabels, setIngestLabels] = useState<Readonly<Record<string, string>>>(
     {},
   );
-  const [sortPreset, setSortPreset] = useState<SortPreset>("camera_day");
+  const [sortPreset, setSortPreset] = useState<SortPreset>("exif_day");
+  const [customIntervalMinutes, setCustomIntervalMinutes] = useState("30");
   const [calibrationKind, setCalibrationKind] = useState<"sd" | "micro_sd">("sd");
   const [calibrationLabel, setCalibrationLabel] = useState("");
   const [history, setHistory] = useState<readonly IngestHistoryEntry[]>([]);
@@ -365,6 +421,8 @@ function App() {
     [liveDevices, selectedId],
   );
   const destination = selected ? (destinations[selected.id] ?? "") : "";
+  const selectedSortRequest = resolveSortRequest(sortPreset, customIntervalMinutes);
+  const selectedSortLevels = sortDirectoryLevels(selectedSortRequest);
   const selectedInventory = selected ? sourceInventories[selected.id] : undefined;
   const selectedInventoryLabel = selected ? sourceInventoryLabels[selected.id] : "";
   const selectedPlanPreview = selected ? planPreviews[selected.id] : undefined;
@@ -406,6 +464,74 @@ function App() {
   const selectedEjectLabel = selected ? ejectLabels[selected.id] : "";
   const selectedOperation = selected ? activeOperations[selected.id] : undefined;
   const selectedIngestLabel = selected ? ingestLabels[selected.id] : "";
+  const canRememberDestination =
+    selected?.nativeConfidence === "hardware_immutable" ||
+    selected?.nativeConfidence === "hardware_stable";
+  const dockOperations = useMemo(
+    () =>
+      Object.entries(activeOperations).map(([deviceId, operation]) => ({
+        ...operation,
+        device: liveDevices.find((device) => device.id === deviceId),
+      })),
+    [activeOperations, liveDevices],
+  );
+  const dockKnownTotalBytes = dockOperations.reduce(
+    (total, operation) => total + (operation.totalBytes ?? 0),
+    0,
+  );
+  const dockTransferredBytes = dockOperations.reduce(
+    (total, operation) => total + operation.transferredBytes,
+    0,
+  );
+  const dockBytesPerSecond = dockOperations.reduce(
+    (total, operation) => total + operation.bytesPerSecond,
+    0,
+  );
+  const dockPercent =
+    dockKnownTotalBytes > 0
+      ? Math.min(100, Math.round((dockTransferredBytes / dockKnownTotalBytes) * 100))
+      : 0;
+  const dockEta =
+    dockKnownTotalBytes > dockTransferredBytes && dockBytesPerSecond > 0
+      ? formatEta((dockKnownTotalBytes - dockTransferredBytes) / dockBytesPerSecond)
+      : "Calculating…";
+  const trackOperationProgress = useCallback(
+    (deviceId: string, update: ProgressUpdate) => {
+      setActiveOperations((current) => {
+        const existing = current[deviceId];
+        if (!existing) return current;
+        const transferredBytes = Math.max(
+          existing.transferredBytes,
+          update.transferredBytes,
+        );
+        const elapsedSeconds = Math.max(
+          0.001,
+          (Date.now() - existing.startedAt) / 1_000,
+        );
+        const bytesPerSecond = transferredBytes / elapsedSeconds;
+        const stateChanged = existing.state !== update.state;
+        const fileChanged = existing.currentFileIndex !== update.currentFileIndex;
+        const log = `${update.state.replace(/_/g, " ")} · ${formatTransferBytes(transferredBytes)}${update.totalBytes === null ? "" : ` / ${formatTransferBytes(update.totalBytes)}`}`;
+        return {
+          ...current,
+          [deviceId]: {
+            ...existing,
+            state: update.state,
+            transferredBytes,
+            totalBytes: update.totalBytes,
+            currentFileIndex: update.currentFileIndex ?? null,
+            totalFiles: update.totalFiles ?? null,
+            bytesPerSecond: Number.isFinite(bytesPerSecond) ? bytesPerSecond : 0,
+            logs:
+              stateChanged || fileChanged
+                ? [...existing.logs, log].slice(-6)
+                : existing.logs,
+          },
+        };
+      });
+    },
+    [],
+  );
   const setSelectedDestination = useCallback(
     (value: string) => {
       if (!selected) return;
@@ -650,6 +776,14 @@ function App() {
   }, [selected]);
   const previewIngestPlan = useCallback(async () => {
     if (!selected) return;
+    const sortRequest = resolveSortRequest(sortPreset, customIntervalMinutes);
+    if (!sortRequest) {
+      setPlanPreviewLabels((current) => ({
+        ...current,
+        [selected.id]: "Enter a whole custom interval from 1 to 1,440 minutes.",
+      }));
+      return;
+    }
     if (!isTauri()) {
       setPlanPreviewLabels((current) => ({
         ...current,
@@ -688,18 +822,8 @@ function App() {
           sourceIdentityConfidence: selected.nativeConfidence,
           sourceGeneration: selected.connectionGeneration,
           maxWorkers: 2,
-          sortMode:
-            sortPreset === "original_tree"
-              ? "original_tree"
-              : sortPreset === "camera_day"
-                ? "camera_day"
-                : "camera_interval",
-          intervalMinutes:
-            sortPreset === "camera_every_hour"
-              ? 60
-              : sortPreset === "camera_every_minute"
-                ? 1
-                : null,
+          sortMode: sortRequest.sortMode,
+          intervalMinutes: sortRequest.intervalMinutes,
           autoIngestTriggered: false,
         },
       });
@@ -719,7 +843,7 @@ function App() {
         [selected.id]: "The desktop service could not preview this organization.",
       }));
     }
-  }, [destination, selected, sortPreset]);
+  }, [customIntervalMinutes, destination, selected, sortPreset]);
   const recallDestination = useCallback(async () => {
     if (!selected || !isTauri()) return;
     try {
@@ -792,6 +916,11 @@ function App() {
       setRegistrationLabel("Choose a destination before registering this card.");
       return;
     }
+    const sortRequest = resolveSortRequest(sortPreset, customIntervalMinutes);
+    if (!sortRequest) {
+      setRegistrationLabel("Enter a whole custom interval from 1 to 1,440 minutes.");
+      return;
+    }
     if (!isTauri()) {
       setRegistrationLabel(
         "Card registration is available in the desktop application.",
@@ -807,18 +936,8 @@ function App() {
         request: {
           sourceMediumKey: selected.id,
           destinationPath: destination.trim(),
-          sortMode:
-            sortPreset === "original_tree"
-              ? "original_tree"
-              : sortPreset === "camera_day"
-                ? "camera_day"
-                : "camera_interval",
-          intervalMinutes:
-            sortPreset === "camera_every_minute"
-              ? 1
-              : sortPreset === "camera_every_hour"
-                ? 60
-                : null,
+          sortMode: sortRequest.sortMode,
+          intervalMinutes: sortRequest.intervalMinutes,
           autoIngestEnabled,
           autoFormatEnabled,
         },
@@ -833,7 +952,14 @@ function App() {
     } catch {
       setRegistrationLabel("The desktop service could not register this card.");
     }
-  }, [autoFormatEnabled, autoIngestEnabled, destination, selected, sortPreset]);
+  }, [
+    autoFormatEnabled,
+    autoIngestEnabled,
+    customIntervalMinutes,
+    destination,
+    selected,
+    sortPreset,
+  ]);
   const checkFormatReadiness = useCallback(
     async (request: {
       runId: string;
@@ -1031,6 +1157,14 @@ function App() {
   }, [refreshDevices, refreshHistory]);
   const startIngest = useCallback(async () => {
     if (!selected) return;
+    const sortRequest = resolveSortRequest(sortPreset, customIntervalMinutes);
+    if (!sortRequest) {
+      setIngestLabels((current) => ({
+        ...current,
+        [selected.id]: "Enter a whole custom interval from 1 to 1,440 minutes.",
+      }));
+      return;
+    }
     if (!isTauri()) {
       setIngestLabels((current) => ({
         ...current,
@@ -1061,6 +1195,7 @@ function App() {
     let latestTransferred = 0;
     progress.onmessage = (update) => {
       if (update.operationId !== operationId) return;
+      trackOperationProgress(selected.id, update);
       const total = update.totalBytes;
       latestTransferred = Math.max(latestTransferred, update.transferredBytes);
       if (update.state === "copying") {
@@ -1111,7 +1246,18 @@ function App() {
     };
     setActiveOperations((current) => ({
       ...current,
-      [selected.id]: { operationId, cancelling: false },
+      [selected.id]: {
+        operationId,
+        cancelling: false,
+        state: "queued",
+        transferredBytes: 0,
+        totalBytes: null,
+        currentFileIndex: null,
+        totalFiles: null,
+        startedAt: Date.now(),
+        bytesPerSecond: 0,
+        logs: ["Queued · waiting for the native ingest worker"],
+      },
     }));
     setIngestLabels((current) => ({
       ...current,
@@ -1130,18 +1276,8 @@ function App() {
           sourceIdentityConfidence: selected.nativeConfidence,
           sourceGeneration: selected.connectionGeneration,
           maxWorkers: 2,
-          sortMode:
-            sortPreset === "original_tree"
-              ? "original_tree"
-              : sortPreset === "camera_day"
-                ? "camera_day"
-                : "camera_interval",
-          intervalMinutes:
-            sortPreset === "camera_every_hour"
-              ? 60
-              : sortPreset === "camera_every_minute"
-                ? 1
-                : null,
+          sortMode: sortRequest.sortMode,
+          intervalMinutes: sortRequest.intervalMinutes,
         },
         channel: progress,
       });
@@ -1200,8 +1336,10 @@ function App() {
     destination,
     refreshDevices,
     refreshHistory,
+    trackOperationProgress,
     selected,
     selectedPlanPreview,
+    customIntervalMinutes,
     sortPreset,
   ]);
   useEffect(() => {
@@ -1243,6 +1381,7 @@ function App() {
           const progress = new Channel<ProgressUpdate>();
           progress.onmessage = (update) => {
             if (update.operationId !== operationId) return;
+            trackOperationProgress(device.id, update);
             const filePosition =
               update.currentFileIndex !== null &&
               update.currentFileIndex !== undefined &&
@@ -1261,7 +1400,18 @@ function App() {
           }));
           setActiveOperations((current) => ({
             ...current,
-            [device.id]: { operationId, cancelling: false },
+            [device.id]: {
+              operationId,
+              cancelling: false,
+              state: "queued",
+              transferredBytes: 0,
+              totalBytes: null,
+              currentFileIndex: null,
+              totalFiles: null,
+              startedAt: Date.now(),
+              bytesPerSecond: 0,
+              logs: ["Queued · registered media detected"],
+            },
           }));
           setIngestLabels((current) => ({
             ...current,
@@ -1323,7 +1473,7 @@ function App() {
           autoIngestProfileChecks.current.delete(attemptKey);
         });
     }
-  }, [activeOperations, liveDevices, refreshHistory]);
+  }, [activeOperations, liveDevices, refreshHistory, trackOperationProgress]);
   const requestSafeEject = useCallback(async () => {
     if (!selected || !selectedCompletedRun) return;
     if (!isTauri()) {
@@ -1510,7 +1660,7 @@ function App() {
               </p>
               <h2
                 id="close-confirmation-title"
-                className="text-xl font-semibold tracking-tight"
+                className="text-2xl font-semibold tracking-tight"
               >
                 Keep This App Open Until Copying Stops
               </h2>
@@ -1546,7 +1696,9 @@ function App() {
   const isCopying = Boolean(selectedOperation) || selected.transfer === "Copying";
 
   return (
-    <main className="ingest-shell min-h-screen bg-slate-50 text-slate-950 transition-colors duration-200 dark:bg-slate-950 dark:text-slate-50">
+    <main
+      className={`ingest-shell min-h-screen bg-slate-50 text-slate-950 transition-colors duration-200 dark:bg-slate-950 dark:text-slate-50 ${dockOperations.length ? "ingest-shell--dock" : ""} ${dockOperations.length && isIngestDockOpen ? "ingest-shell--dock-expanded" : ""}`}
+    >
       <a className="skip-to-workspace" href="#ingest-workspace">
         Skip to workspace
       </a>
@@ -1558,12 +1710,7 @@ function App() {
           >
             <HardDriveDownload className="size-5" strokeWidth={2.25} />
           </div>
-          <div>
-            <p className="mb-0.5 text-[10px] font-bold tracking-[0.14em] text-blue-600 dark:text-blue-400">
-              Local Media Ingest
-            </p>
-            <h1 className="text-sm font-semibold tracking-tight">Ingest Station</h1>
-          </div>
+          <h1 className="text-base font-semibold tracking-tight">Media Ingest Tool</h1>
         </div>
         <div className="flex items-center gap-3">
           <span className="hidden items-center gap-2 text-xs text-slate-500 sm:flex dark:text-slate-400">
@@ -1596,7 +1743,7 @@ function App() {
               </p>
               <h2
                 id="connected-media-title"
-                className="text-sm font-semibold tracking-tight"
+                className="text-base font-semibold tracking-tight"
               >
                 Connected Media
               </h2>
@@ -1666,7 +1813,7 @@ function App() {
           id="ingest-workspace"
           aria-labelledby="device-title"
         >
-          <div className="flex flex-col justify-between gap-6 border-b border-slate-200 pb-8 md:flex-row dark:border-slate-800">
+          <div className="flex flex-col justify-between gap-6 pb-8 md:flex-row">
             <div>
               <div className="mb-3 flex items-center gap-3">
                 <span
@@ -1747,8 +1894,10 @@ function App() {
           </div>
           <div className="my-8 grid divide-y divide-slate-200 border-y border-slate-200 sm:grid-cols-3 sm:divide-x sm:divide-y-0 dark:divide-slate-800 dark:border-slate-800">
             <article className="py-4 sm:px-5 sm:first:pl-0">
-              <p className="text-xs text-slate-500 dark:text-slate-400">Media</p>
-              <strong className="mt-2 block text-sm font-semibold">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400">
+                Media
+              </p>
+              <strong className="mt-2 block text-base font-semibold">
                 {selectedInventory
                   ? `${selectedInventory.fileCount} files · ${formatTransferBytes(selectedInventory.totalBytes)}`
                   : selected.media}
@@ -1758,8 +1907,10 @@ function App() {
               </span>
             </article>
             <article className="py-4 sm:px-5">
-              <p className="text-xs text-slate-500 dark:text-slate-400">Transfer</p>
-              <strong className="mt-2 flex items-center gap-2 text-sm font-semibold">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400">
+                Transfer
+              </p>
+              <strong className="mt-2 flex items-center gap-2 text-base font-semibold">
                 <StatusDot tone={isCopying ? "copying" : "ready"} />{" "}
                 {isCopying ? "Copying" : selected.transfer}
               </strong>
@@ -1768,8 +1919,10 @@ function App() {
               </span>
             </article>
             <article className="py-4 sm:px-5">
-              <p className="text-xs text-slate-500 dark:text-slate-400">Verification</p>
-              <strong className="mt-2 flex items-center gap-2 text-sm font-semibold">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400">
+                Verification
+              </p>
+              <strong className="mt-2 flex items-center gap-2 text-base font-semibold">
                 <StatusDot
                   tone={selected.verification === "Verified" ? "verified" : "ready"}
                 />{" "}
@@ -1782,21 +1935,15 @@ function App() {
           </div>
           <div className="grid gap-8 lg:grid-cols-[minmax(0,1.2fr)_minmax(17rem,0.8fr)]">
             <article>
-              <div className="flex items-start justify-between gap-4">
+              <div>
                 <div>
                   <p className="mb-1 text-[10px] font-bold tracking-[0.14em] text-slate-400 dark:text-slate-500">
                     INGEST PLAN
                   </p>
-                  <h3 className="text-base font-semibold tracking-tight">
+                  <h3 className="text-lg font-semibold tracking-tight">
                     Destination & Organization
                   </h3>
                 </div>
-                <button
-                  className="text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400"
-                  type="button"
-                >
-                  Change
-                </button>
               </div>
               <label className="mt-6 grid gap-2 text-xs font-medium text-slate-600 dark:text-slate-300">
                 <span>Destination directory</span>
@@ -1804,7 +1951,7 @@ function App() {
                   <input
                     aria-label="Destination directory"
                     autoComplete="off"
-                    className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2.5 font-mono text-xs text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                    className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2.5 font-mono text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100 dark:shadow-inner"
                     name="destination-directory"
                     onChange={(event) => setSelectedDestination(event.target.value)}
                     placeholder={selected.destination}
@@ -1833,16 +1980,26 @@ function App() {
               <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
                 <button
                   className="text-xs font-semibold text-blue-600 disabled:cursor-not-allowed disabled:opacity-40 dark:text-blue-400"
-                  disabled={isCopying}
+                  disabled={isCopying || !canRememberDestination}
                   onClick={() => void recallDestination()}
+                  title={
+                    canRememberDestination
+                      ? "Recall the destination saved for this exact card."
+                      : "Requires stable hardware card identity."
+                  }
                   type="button"
                 >
                   Recall Saved Destination
                 </button>
                 <button
                   className="text-xs font-semibold text-blue-600 disabled:cursor-not-allowed disabled:opacity-40 dark:text-blue-400"
-                  disabled={!destination.trim() || isCopying}
+                  disabled={!destination.trim() || isCopying || !canRememberDestination}
                   onClick={() => void rememberDestination()}
+                  title={
+                    canRememberDestination
+                      ? "Save this destination for this exact card."
+                      : "Requires stable hardware card identity."
+                  }
                   type="button"
                 >
                   Remember for This Card
@@ -1875,39 +2032,91 @@ function App() {
                   {registrationLabel}
                 </span>
               </div>
-              <div className="mt-6 flex items-center justify-between gap-4 border-t border-slate-200 py-3 text-xs dark:border-slate-800">
-                <span className="text-slate-500 dark:text-slate-400">Sort rule</span>
-                <label>
-                  <span className="sr-only">Sort rule</span>
-                  <select
-                    aria-label="Sort rule"
-                    name="sort-rule"
-                    onChange={(event) => {
-                      setSortPreset(event.target.value as SortPreset);
-                      if (!selected) return;
-                      setPlanPreviews((current) => {
-                        const next = { ...current };
-                        delete next[selected.id];
-                        return next;
-                      });
-                      setPlanPreviewLabels((current) => {
-                        const next = { ...current };
-                        delete next[selected.id];
-                        return next;
-                      });
-                    }}
-                    value={sortPreset}
-                    className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-                  >
-                    <option value="camera_day">Camera body / capture day</option>
-                    <option value="camera_every_hour">Camera body / every hour</option>
-                    <option value="camera_every_minute">
-                      Camera body / every minute
-                    </option>
-                    <option value="original_tree">Keep original folder tree</option>
-                  </select>
-                </label>
-              </div>
+              <fieldset className="mt-6 border-t border-slate-200 py-4 dark:border-slate-800">
+                <legend className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                  Sort from capture metadata
+                </legend>
+                <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
+                  Uses EXIF capture time when available; unsupported or missing metadata
+                  stays traceable and falls back to the source file timestamp.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2" aria-label="Sort rule">
+                  {(
+                    [
+                      ["exif_day", "EXIF day"],
+                      ["exif_hour", "EXIF hour"],
+                      ["exif_custom", "Custom interval"],
+                      ["original_tree", "Original tree"],
+                    ] as const
+                  ).map(([preset, label]) => (
+                    <button
+                      aria-pressed={sortPreset === preset}
+                      className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+                        sortPreset === preset
+                          ? "border-blue-600 bg-blue-600 text-white"
+                          : "border-slate-200 bg-white text-slate-700 hover:border-blue-300 hover:text-blue-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-blue-500/60 dark:hover:text-blue-300"
+                      }`}
+                      key={preset}
+                      onClick={() => {
+                        setSortPreset(preset);
+                        if (!selected) return;
+                        setPlanPreviews((current) => {
+                          const next = { ...current };
+                          delete next[selected.id];
+                          return next;
+                        });
+                        setPlanPreviewLabels((current) => {
+                          const next = { ...current };
+                          delete next[selected.id];
+                          return next;
+                        });
+                      }}
+                      type="button"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {sortPreset === "exif_custom" ? (
+                  <label className="mt-3 flex max-w-xs items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-200">
+                    Every
+                    <input
+                      aria-label="Custom interval minutes"
+                      className="w-20 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-right font-mono text-sm outline-none focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                      max={CUSTOM_INTERVAL_MINUTES_MAX}
+                      min={CUSTOM_INTERVAL_MINUTES_MIN}
+                      onChange={(event) => setCustomIntervalMinutes(event.target.value)}
+                      step={1}
+                      type="number"
+                      value={customIntervalMinutes}
+                    />
+                    minutes
+                  </label>
+                ) : null}
+                <div className="mt-4 grid gap-2 rounded-lg bg-slate-50 p-3 text-xs dark:bg-slate-800/70">
+                  <span className="font-semibold text-slate-700 dark:text-slate-200">
+                    Destination depth · {selectedSortLevels.length} levels
+                  </span>
+                  <ol className="flex flex-wrap items-center gap-1.5 text-slate-600 dark:text-slate-300">
+                    {selectedSortLevels.map((level, index) => (
+                      <li
+                        className="flex items-center gap-1.5"
+                        key={`${index}-${level}`}
+                      >
+                        <span className="rounded bg-white px-2 py-1 font-mono text-[11px] shadow-sm dark:bg-slate-900">
+                          {level}
+                        </span>
+                        {index < selectedSortLevels.length - 1 ? <span>/</span> : null}
+                      </li>
+                    ))}
+                  </ol>
+                  {!selectedSortRequest ? (
+                    <span className="text-amber-700 dark:text-amber-300">
+                      Enter a whole interval from 1 to 1,440 minutes.
+                    </span>
+                  ) : null}
+                </div>
+              </fieldset>
               <div className="flex items-center justify-between gap-4 border-t border-slate-200 py-3 text-xs dark:border-slate-800">
                 <span className="text-slate-500 dark:text-slate-400">
                   Camera identity
@@ -1997,7 +2206,7 @@ function App() {
                   <p className="mb-1 text-[10px] font-bold tracking-[0.14em] text-slate-400 dark:text-slate-500">
                     HARDWARE EVIDENCE
                   </p>
-                  <h3 className="text-base font-semibold tracking-tight">
+                  <h3 className="text-lg font-semibold tracking-tight">
                     Identity & Reader
                   </h3>
                 </div>
@@ -2013,7 +2222,7 @@ function App() {
                   <dt className="mb-1 text-[11px] text-slate-500 dark:text-slate-400">
                     Identity evidence
                   </dt>
-                  <dd className="m-0 font-mono text-xs leading-5 text-slate-700 dark:text-slate-200">
+                  <dd className="m-0 font-mono text-sm leading-5 text-slate-700 dark:text-slate-200">
                     {selected.identity}
                   </dd>
                 </div>
@@ -2021,7 +2230,7 @@ function App() {
                   <dt className="mb-1 text-[11px] text-slate-500 dark:text-slate-400">
                     Reader
                   </dt>
-                  <dd className="m-0 font-mono text-xs leading-5 text-slate-700 dark:text-slate-200">
+                  <dd className="m-0 font-mono text-sm leading-5 text-slate-700 dark:text-slate-200">
                     {selected.reader}
                   </dd>
                 </div>
@@ -2029,7 +2238,7 @@ function App() {
                   <dt className="mb-1 text-[11px] text-slate-500 dark:text-slate-400">
                     Physical location
                   </dt>
-                  <dd className="m-0 font-mono text-xs leading-5 text-slate-700 dark:text-slate-200">
+                  <dd className="m-0 font-mono text-sm leading-5 text-slate-700 dark:text-slate-200">
                     {selected.slot}
                   </dd>
                 </div>
@@ -2037,7 +2246,7 @@ function App() {
                   <dt className="mb-1 text-[11px] text-slate-500 dark:text-slate-400">
                     Current connection
                   </dt>
-                  <dd className="m-0 font-mono text-xs leading-5 text-slate-700 dark:text-slate-200">
+                  <dd className="m-0 font-mono text-sm leading-5 text-slate-700 dark:text-slate-200">
                     Insertion {selected.connectionGeneration} · changes after this
                     medium is absent
                   </dd>
@@ -2046,7 +2255,7 @@ function App() {
                   <dt className="mb-1 text-[11px] text-slate-500 dark:text-slate-400">
                     Volume reference
                   </dt>
-                  <dd className="m-0 font-mono text-xs leading-5 text-slate-700 dark:text-slate-200">
+                  <dd className="m-0 font-mono text-sm leading-5 text-slate-700 dark:text-slate-200">
                     Observed only · never used as identity
                   </dd>
                 </div>
@@ -2100,7 +2309,7 @@ function App() {
               <p className="mb-1 text-[10px] font-bold tracking-[0.14em] text-blue-700 dark:text-blue-300">
                 VERIFICATION GATE
               </p>
-              <h3 className="text-sm font-semibold">
+              <h3 className="text-lg font-semibold tracking-tight">
                 {selected.verification === "Verified"
                   ? "All copied files are verified"
                   : "Verification Begins After Every Copy"}
@@ -2126,10 +2335,7 @@ function App() {
                 <p className="mb-1 text-[10px] font-bold tracking-[0.14em] text-slate-400 dark:text-slate-500">
                   LOCAL HISTORY
                 </p>
-                <h3
-                  id="history-title"
-                  className="text-base font-semibold tracking-tight"
-                >
+                <h3 id="history-title" className="text-lg font-semibold tracking-tight">
                   Recent Ingests
                 </h3>
               </div>
@@ -2149,7 +2355,7 @@ function App() {
                     key={run.runId}
                   >
                     <span className="grid gap-0.5">
-                      <strong>{formatRunState(run.state)}</strong>
+                      <strong className="text-sm">{formatRunState(run.state)}</strong>
                       <small className="text-[11px] text-slate-500 dark:text-slate-400">
                         {run.receiptAvailable ? "Receipt sealed" : "No receipt"}
                       </small>
@@ -2213,7 +2419,7 @@ function App() {
             </p>
             <h2
               id="format-confirmation-title"
-              className="text-xl font-semibold tracking-tight"
+              className="text-2xl font-semibold tracking-tight"
             >
               Quick Format This Verified Card?
             </h2>
@@ -2292,7 +2498,7 @@ function App() {
             </p>
             <h2
               id="close-confirmation-title"
-              className="text-xl font-semibold tracking-tight"
+              className="text-2xl font-semibold tracking-tight"
             >
               Keep This App Open Until Copying Stops
             </h2>
@@ -2345,7 +2551,7 @@ function App() {
                 </p>
                 <h2
                   id="auto-ingest-title"
-                  className="text-xl font-semibold tracking-tight"
+                  className="text-2xl font-semibold tracking-tight"
                 >
                   Set Up Auto-Ingest
                 </h2>
@@ -2369,7 +2575,7 @@ function App() {
                 <input
                   aria-label="Auto-ingest destination directory"
                   autoComplete="off"
-                  className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2.5 font-mono text-xs text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2.5 font-mono text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100 dark:shadow-inner"
                   name="auto-ingest-destination-directory"
                   onChange={(event) => setSelectedDestination(event.target.value)}
                   placeholder="Choose a destination folder"
@@ -2471,6 +2677,123 @@ function App() {
             </div>
           </section>
         </div>
+      ) : null}
+      {dockOperations.length ? (
+        <section
+          aria-label="All ingest progress"
+          className="ingest-progress-dock fixed bottom-4 z-40 mx-auto max-w-5xl rounded-2xl border border-slate-200 bg-white/95 shadow-2xl backdrop-blur dark:border-slate-700 dark:bg-slate-900/95"
+        >
+          <button
+            aria-expanded={isIngestDockOpen}
+            className="flex w-full items-center gap-3 px-4 py-2.5 text-left sm:px-5"
+            onClick={() => setIsIngestDockOpen((current) => !current)}
+            type="button"
+          >
+            <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-blue-600 text-white">
+              <ListTodo aria-hidden="true" className="size-4" strokeWidth={2.25} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="flex items-center justify-between gap-3">
+                <strong className="truncate text-sm">
+                  All Ingest Work · {dockOperations.length} active
+                </strong>
+                <span className="shrink-0 text-sm font-semibold tabular-nums">
+                  {dockPercent}%
+                </span>
+              </span>
+              <span className="mt-1.5 block h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                <span
+                  className="block h-full rounded-full bg-blue-600 transition-[width] duration-300"
+                  style={{ width: `${dockPercent}%` }}
+                />
+              </span>
+              <span className="mt-1 flex justify-between gap-3 text-[11px] text-slate-500 dark:text-slate-400">
+                <span className="truncate">
+                  {formatTransferBytes(dockTransferredBytes)}
+                  {dockKnownTotalBytes
+                    ? ` / ${formatTransferBytes(dockKnownTotalBytes)}`
+                    : ""}
+                </span>
+                <span className="shrink-0">ETA {dockEta}</span>
+              </span>
+            </span>
+            {isIngestDockOpen ? (
+              <ChevronDown
+                aria-hidden="true"
+                className="size-5 text-slate-500 dark:text-slate-400"
+              />
+            ) : (
+              <ChevronUp
+                aria-hidden="true"
+                className="size-5 text-slate-500 dark:text-slate-400"
+              />
+            )}
+          </button>
+          {isIngestDockOpen ? (
+            <div className="max-h-[42vh] overflow-y-auto border-t border-slate-200 px-4 py-3 dark:border-slate-700 sm:px-5">
+              <ul className="grid gap-3" aria-label="Per-operation ingest progress">
+                {dockOperations.map((operation) => {
+                  const percent =
+                    operation.totalBytes && operation.totalBytes > 0
+                      ? Math.min(
+                          100,
+                          Math.round(
+                            (operation.transferredBytes / operation.totalBytes) * 100,
+                          ),
+                        )
+                      : 0;
+                  return (
+                    <li
+                      className="rounded-xl border border-slate-200 p-3 dark:border-slate-700"
+                      key={operation.operationId}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <strong className="block text-sm">
+                            {operation.device?.name ?? "Disconnected source"}
+                          </strong>
+                          <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-400">
+                            {operation.cancelling
+                              ? "Cancelling"
+                              : formatRunState(
+                                  operation.state as IngestHistoryEntry["state"],
+                                )}
+                            {operation.currentFileIndex && operation.totalFiles
+                              ? ` · file ${operation.currentFileIndex} of ${operation.totalFiles}`
+                              : ""}
+                          </span>
+                        </div>
+                        <span className="text-sm font-semibold tabular-nums">
+                          {percent}%
+                        </span>
+                      </div>
+                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                        <div
+                          className="h-full rounded-full bg-blue-600"
+                          style={{ width: `${percent}%` }}
+                        />
+                      </div>
+                      <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">
+                        {formatTransferBytes(operation.transferredBytes)}
+                        {operation.totalBytes
+                          ? ` / ${formatTransferBytes(operation.totalBytes)}`
+                          : ""}
+                        {operation.bytesPerSecond > 0
+                          ? ` · ${(operation.bytesPerSecond / 1_000_000).toFixed(1)} MB/s`
+                          : ""}
+                      </p>
+                      <ol className="mt-2 grid gap-1 border-l-2 border-slate-200 pl-3 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                        {operation.logs.map((log, index) => (
+                          <li key={`${operation.operationId}-${index}`}>{log}</li>
+                        ))}
+                      </ol>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : null}
+        </section>
       ) : null}
       <footer className="flex min-h-11 flex-col justify-between gap-2 border-t border-slate-200 px-5 py-3 text-[11px] text-slate-500 sm:flex-row sm:items-center sm:px-8 dark:border-slate-800 dark:text-slate-400">
         <span>Local-first · native removable-media inventory</span>

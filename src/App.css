@@ -98,6 +98,26 @@ a:focus-visible {
   scroll-margin-top: 6rem;
 }
 
+.ingest-shell--dock {
+  padding-bottom: 6.5rem;
+}
+
+.ingest-shell--dock-expanded {
+  padding-bottom: min(48vh, 31rem);
+}
+
+.ingest-progress-dock {
+  right: 1rem;
+  left: 1rem;
+}
+
+@media (min-width: 1024px) {
+  .ingest-progress-dock {
+    right: 1.5rem;
+    left: calc(19rem + 1.5rem);
+  }
+}
+
 .ingest-shell h1,
 .ingest-shell h2,
 .ingest-shell h3 {
@@ -255,7 +275,7 @@ html:not(.dark) .ingest-shell button:disabled {
 button,
 input,
 select {
-  font: inherit;
+  font-family: inherit;
 }
 
 @utility status-dot {
