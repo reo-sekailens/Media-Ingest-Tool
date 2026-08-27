@@ -234,3 +234,12 @@ silently with exit code 0. Its installed executable launched successfully and
 read the retained managed marker, completed automatic format receipt, healthy
 exFAT status, and exact M: capacity. This is current-machine install evidence;
 manual confirmation and clean-machine certification remain separate.
+
+2026-08-28 recovery exception: the operator UI now exposes a separately
+labelled Force Reformat route for a current registered hardware-stable card
+whose normal managed-witness/receipt relationship is stale. It requires the
+exact typed phrase `FORCE REFORMAT`, preserves the 60-second single-use token,
+native target/profile resolution, no-active-ingest check, remount validation,
+and sentinel I/O. It deliberately bypasses only receipt continuity and thus
+does not create a receipt-bound format row. This is source/fixture coverage;
+no destructive hardware test has exercised the exception.

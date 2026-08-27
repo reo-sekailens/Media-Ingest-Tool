@@ -401,3 +401,11 @@ EXIF. The env-gated hardware test read that removable source, projected the
 dragged custom/camera/day/30-minute layout, copied it to a temporary
 destination, independently verified all bytes, wrote a receipt, and removed
 only that temporary destination. The source marker and fixture files remain.
+
+2026-08-28 force-reformat recovery: the normal format gate remains receipt and
+managed-witness bound. A separately labeled operator recovery path can bypass
+only that stale-witness check after the exact phrase `FORCE REFORMAT`; it still
+requires one current hardware-stable registered card, no active ingest, a
+native allowlisted capacity profile, a 60-second single-use token, exact target
+revalidation, remount validation, and sentinel I/O. This route intentionally
+does not write a receipt-bound format record because it has no sealed ingest.

@@ -245,6 +245,13 @@ type PendingFormatConfirmation = {
   profile: FormatEligibility["recommendedProfile"];
 };
 
+type PendingForceReformat = {
+  deviceId: string;
+  deviceName: string;
+  media: string;
+  capacity: string;
+};
+
 type IngestHistoryEntry = {
   runId: string;
   sourceIdentityKey: string;
@@ -471,6 +478,9 @@ function App() {
   >({});
   const [pendingFormatConfirmation, setPendingFormatConfirmation] =
     useState<PendingFormatConfirmation | null>(null);
+  const [pendingForceReformat, setPendingForceReformat] =
+    useState<PendingForceReformat | null>(null);
+  const [forceReformatPhrase, setForceReformatPhrase] = useState("");
   const [isExecutingFormat, setIsExecutingFormat] = useState(false);
   const [completedRuns, setCompletedRuns] = useState<
     Readonly<Record<string, CompletedRun>>
@@ -1213,6 +1223,65 @@ function App() {
       setIsExecutingFormat(false);
     }
   }, [isExecutingFormat, pendingFormatConfirmation, refreshDevices, refreshHistory]);
+  const executeForceReformat = useCallback(async () => {
+    const confirmation = pendingForceReformat;
+    if (!confirmation || !selected || isExecutingFormat) return;
+    setIsExecutingFormat(true);
+    try {
+      const authorization = await invoke<{
+        data: FormatAuthorization | null;
+        error: { message: string } | null;
+      }>("request_force_format_authorization", {
+        request: {
+          sourceMediumKey: selected.id,
+          sourceGeneration: selected.connectionGeneration,
+          confirmationPhrase: forceReformatPhrase,
+        },
+      });
+      if (!authorization.data) {
+        setFormatReadinessLabels((current) => ({
+          ...current,
+          [selected.id]:
+            authorization.error?.message ?? "Force reformat was not authorized.",
+        }));
+        return;
+      }
+      const response = await invoke<{
+        data: FormatExecutionResult | null;
+        error: { message: string } | null;
+      }>("execute_format_authorization", {
+        request: { confirmationToken: authorization.data.confirmationToken },
+      });
+      setFormatReadinessLabels((current) => ({
+        ...current,
+        [selected.id]: response.data
+          ? `Force reformat completed: ${response.data.profileId}; formatted and writable${response.data.markerRestored ? "; card registration restored" : ""}.`
+          : (response.error?.message ?? "Force reformat did not complete."),
+      }));
+      if (response.data) {
+        setPendingForceReformat(null);
+        setForceReformatPhrase("");
+        await Promise.all([refreshDevices(), refreshHistory()]);
+      }
+    } catch (error) {
+      setFormatReadinessLabels((current) => ({
+        ...current,
+        [selected.id]:
+          error instanceof Error
+            ? `The desktop service could not complete force reformat: ${error.message}`
+            : "The desktop service could not complete force reformat.",
+      }));
+    } finally {
+      setIsExecutingFormat(false);
+    }
+  }, [
+    forceReformatPhrase,
+    isExecutingFormat,
+    pendingForceReformat,
+    refreshDevices,
+    refreshHistory,
+    selected,
+  ]);
 
   useEffect(() => {
     if (
@@ -2035,6 +2104,28 @@ function App() {
                     ? "Eligible for a one-time quick-format confirmation."
                     : "Native format provider not installed.")}
               </span>
+              <button
+                className="rounded-lg border border-rose-300 bg-white px-3 py-2 text-xs font-semibold text-rose-800 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/40 dark:bg-slate-900 dark:text-rose-200"
+                disabled={!selected || isCopying || !canRememberDestination}
+                onClick={() =>
+                  selected &&
+                  setPendingForceReformat({
+                    deviceId: selected.id,
+                    deviceName: selected.name,
+                    media: selected.media,
+                    capacity: selected.capacity,
+                  })
+                }
+                title="Recovery option for a registered card when its sealed-receipt witness is no longer current."
+                type="button"
+              >
+                Force Reformat
+              </button>
+              <span className="max-w-xs text-xs leading-5 text-slate-500 md:text-right dark:text-slate-400">
+                Bypasses the sealed-receipt witness only after typing an explicit
+                confirmation; card identity, registration, and native checks still
+                apply.
+              </span>
             </div>
           </div>
           <div className="my-8 grid divide-y divide-slate-200 border-y border-slate-200 sm:grid-cols-3 sm:divide-x sm:divide-y-0 dark:divide-slate-800 dark:border-slate-800">
@@ -2786,6 +2877,75 @@ function App() {
                 type="button"
               >
                 {isExecutingFormat ? "Quick Formatting…" : "Quick Format Card"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {pendingForceReformat ? (
+        <div
+          aria-labelledby="force-reformat-title"
+          aria-modal="true"
+          className="fixed inset-0 z-50 grid place-items-center overscroll-contain bg-slate-950/55 p-4 backdrop-blur-sm"
+          role="dialog"
+        >
+          <section className="w-full max-w-lg rounded-2xl border border-rose-200 bg-white p-6 shadow-2xl dark:border-rose-500/25 dark:bg-slate-900">
+            <p className="mb-1 text-[10px] font-bold tracking-[0.14em] text-rose-700 dark:text-rose-300">
+              RECOVERY DESTRUCTIVE ACTION
+            </p>
+            <h2
+              id="force-reformat-title"
+              className="text-2xl font-semibold tracking-tight"
+            >
+              Force Reformat This Registered Card?
+            </h2>
+            <p className="mt-3 text-sm leading-6 text-slate-600 dark:text-slate-300">
+              Use this only when the normal verified-card format path is blocked by a
+              stale receipt witness. It bypasses that receipt check and removes all
+              filesystem structures; it is not secure erasure.
+            </p>
+            <dl className="mt-5 grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs dark:border-slate-700 dark:bg-slate-950/40">
+              <div className="grid gap-1 sm:grid-cols-[8rem_1fr] sm:gap-3">
+                <dt className="text-slate-500 dark:text-slate-400">Selected media</dt>
+                <dd className="m-0 font-semibold">{pendingForceReformat.deviceName}</dd>
+              </div>
+              <div className="grid gap-1 sm:grid-cols-[8rem_1fr] sm:gap-3">
+                <dt className="text-slate-500 dark:text-slate-400">Media contents</dt>
+                <dd className="m-0 font-semibold">{pendingForceReformat.media}</dd>
+              </div>
+              <div className="grid gap-1 sm:grid-cols-[8rem_1fr] sm:gap-3">
+                <dt className="text-slate-500 dark:text-slate-400">Capacity</dt>
+                <dd className="m-0 font-semibold">{pendingForceReformat.capacity}</dd>
+              </div>
+            </dl>
+            <label className="mt-5 grid gap-2 text-xs font-semibold text-slate-700 dark:text-slate-200">
+              Type <code>FORCE REFORMAT</code> to enable this action
+              <input
+                aria-label="Force reformat confirmation"
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-sm font-normal dark:border-slate-600 dark:bg-slate-950"
+                value={forceReformatPhrase}
+                onChange={(event) => setForceReformatPhrase(event.target.value)}
+              />
+            </label>
+            <div className="mt-6 flex flex-wrap justify-end gap-3">
+              <button
+                className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:text-slate-300 dark:hover:bg-slate-800"
+                disabled={isExecutingFormat}
+                onClick={() => {
+                  setPendingForceReformat(null);
+                  setForceReformatPhrase("");
+                }}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-lg bg-rose-700 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-rose-600 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={isExecutingFormat || forceReformatPhrase !== "FORCE REFORMAT"}
+                onClick={() => void executeForceReformat()}
+                type="button"
+              >
+                {isExecutingFormat ? "Force Reformatting…" : "Force Reformat Card"}
               </button>
             </div>
           </section>

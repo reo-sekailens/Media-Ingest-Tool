@@ -368,3 +368,10 @@ Tool` product title beside the app icon, removing redundant local-workflow
   requested reordered hierarchy, independently verified all copies, and
   sealed a receipt in a temporary destination that was then removed. No source
   media or marker was deleted.
+
+- 2026-08-28 — Added a typed `FORCE REFORMAT` recovery control for a current,
+  hardware-stable registered card when the sealed receipt no longer matches
+  its managed witness. It keeps the native-only profile, exact-target,
+  generation, active-ingest, remount, and sentinel gates, and issues the same
+  short-lived single-use authorization. This bypasses only receipt continuity;
+  no destructive hardware run was performed for this new route.

@@ -306,6 +306,20 @@ test("confirms an eligible quick format with an opaque native token", async () =
   const quickFormat = await screen.findByRole("button", { name: /^quick format$/i });
   await waitFor(() => expect(quickFormat).toBeEnabled());
 
+  fireEvent.click(screen.getByRole("button", { name: /^force reformat$/i }));
+  const forceDialog = await screen.findByRole("dialog", {
+    name: /force reformat this registered card/i,
+  });
+  const forceSubmit = within(forceDialog).getByRole("button", {
+    name: /force reformat card/i,
+  });
+  expect(forceSubmit).toBeDisabled();
+  fireEvent.change(within(forceDialog).getByLabelText(/force reformat confirmation/i), {
+    target: { value: "FORCE REFORMAT" },
+  });
+  expect(forceSubmit).toBeEnabled();
+  fireEvent.click(within(forceDialog).getByRole("button", { name: /cancel/i }));
+
   fireEvent.click(quickFormat);
   expect(
     await screen.findByRole("dialog", { name: /quick format this verified card/i }),

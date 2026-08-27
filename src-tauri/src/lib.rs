@@ -18,7 +18,7 @@ pub mod reader_slots;
 pub mod storage_marker;
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{
@@ -365,6 +365,17 @@ pub struct FormatAuthorizationRequest {
     pub source_medium_key: String,
     pub source_generation: u64,
     pub source_identity_confidence: IdentityConfidence,
+}
+
+/// Recovery-only destructive operation. This deliberately has no mount path,
+/// filesystem, or profile input: those stay native-owned. It is available only
+/// for an already registered current card after the operator types the phrase.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ForceFormatAuthorizationRequest {
+    pub source_medium_key: String,
+    pub source_generation: u64,
+    pub confirmation_phrase: String,
 }
 
 /// The webview identifies only the completed run and native source identity.
@@ -1113,6 +1124,117 @@ fn request_format_authorization(
     })
 }
 
+#[tauri::command]
+fn request_force_format_authorization(
+    request: ForceFormatAuthorizationRequest,
+    state: State<'_, AppState>,
+) -> IpcResponse<FormatAuthorizationResult> {
+    if request.confirmation_phrase.trim() != "FORCE REFORMAT" {
+        return IpcResponse::failure(
+            IpcErrorCode::InvalidRequest,
+            "Type FORCE REFORMAT exactly before preparing this recovery action",
+        );
+    }
+    let snapshot = native_device_snapshot(&state.store, &state.connection_generations);
+    let current = snapshot
+        .devices
+        .iter()
+        .filter(|device| {
+            device.state == DeviceState::Available
+                && device.identity.media_key == request.source_medium_key
+                && device.connection_generation == request.source_generation
+                && device.details.mount_locations.len() == 1
+        })
+        .collect::<Vec<_>>();
+    let Some(device) = (current.len() == 1).then(|| current[0]) else {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "The selected card is no longer uniquely present",
+        );
+    };
+    if !matches!(
+        device.identity.confidence,
+        IdentityConfidence::HardwareImmutable | IdentityConfidence::HardwareStable
+    ) {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "Force reformat needs a hardware-stable current card identity",
+        );
+    }
+    if state
+        .active_ingests
+        .lock()
+        .map(|active| {
+            active
+                .values()
+                .any(|ingest| ingest.source_medium_key == request.source_medium_key)
+        })
+        .unwrap_or(true)
+    {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "The source medium is still participating in an ingest",
+        );
+    }
+    let Ok(Some(marker)) =
+        crate::storage_marker::read_record(Path::new(&device.details.mount_locations[0]))
+    else {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "Force reformat is limited to a currently registered managed card",
+        );
+    };
+    let registered = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| store.marker_ingest_profile(&marker.token).ok().flatten())
+        .is_some();
+    if !registered {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "Force reformat is limited to a currently registered managed card",
+        );
+    }
+    let Some(profile) = recommended_profile(device.details.total_bytes) else {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "No safe generic format profile is available for this card capacity",
+        );
+    };
+    let run_id = format!("force-reformat:{}", uuid::Uuid::new_v4());
+    let authorization = match issue_authorization(
+        &request.source_medium_key,
+        request.source_generation,
+        &run_id,
+        profile.id,
+        true,
+        true,
+        std::time::SystemTime::now(),
+    ) {
+        Ok(authorization) => authorization,
+        Err(_) => {
+            return IpcResponse::failure(
+                IpcErrorCode::DeviceUnavailable,
+                "The force-reformat authorization could not be created",
+            )
+        }
+    };
+    let confirmation_token = authorization.token.clone();
+    let Ok(mut authorizations) = state.format_authorizations.lock() else {
+        return IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "The quick-format authorization store is unavailable",
+        );
+    };
+    authorizations.retain(|_, existing| existing.expires_at > std::time::SystemTime::now());
+    authorizations.insert(confirmation_token.clone(), authorization);
+    IpcResponse::success(FormatAuthorizationResult {
+        confirmation_token,
+        expires_in_seconds: 60,
+    })
+}
+
 /// Consumes a fresh confirmation token and performs the native-only format
 /// sequence. The token is removed before the second device observation, so a
 /// disappearing card, an expired token, or a failed provider attempt can
@@ -1209,7 +1331,7 @@ fn execute_format_authorization(
             )
             .ok()
     }) == Some(true);
-    if !has_receipt {
+    if !authorization.force_reformat && !has_receipt {
         return IpcResponse::failure(
             IpcErrorCode::DeviceUnavailable,
             "The sealed verification receipt is no longer current for this card",
@@ -1220,7 +1342,7 @@ fn execute_format_authorization(
         .lock()
         .map(|store| managed_card_matches_sealed_receipt(&store, &authorization.run_id, device))
         .unwrap_or(false);
-    if !managed_card_matches {
+    if !authorization.force_reformat && !managed_card_matches {
         return IpcResponse::failure(
             IpcErrorCode::DeviceUnavailable,
             "The registered managed-card witness no longer matches the sealed receipt",
@@ -1291,13 +1413,20 @@ fn execute_format_authorization(
             }
             None => false,
         };
-        let recorded = store.lock().ok().and_then(|mut store| {
-            store
-                .record_completed_format(&run_id, &medium_key, generation, &profile_id_for_receipt)
-                .ok()
-        }) == Some(true);
-        if !recorded {
-            return Err(crate::format_provider::FormatProviderError::ValidationFailed);
+        if !authorization.force_reformat {
+            let recorded = store.lock().ok().and_then(|mut store| {
+                store
+                    .record_completed_format(
+                        &run_id,
+                        &medium_key,
+                        generation,
+                        &profile_id_for_receipt,
+                    )
+                    .ok()
+            }) == Some(true);
+            if !recorded {
+                return Err(crate::format_provider::FormatProviderError::ValidationFailed);
+            }
         }
         Ok(marker_restored)
     })();
@@ -3465,6 +3594,7 @@ pub fn run() {
             safe_eject,
             preview_verified_ingest,
             request_format_authorization,
+            request_force_format_authorization,
             execute_format_authorization,
             watch_device_snapshots,
             calibrate_reader_slot,

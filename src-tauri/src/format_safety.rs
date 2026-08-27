@@ -12,6 +12,9 @@ pub struct FormatAuthorization {
     pub expires_at: SystemTime,
     pub run_id: String,
     pub profile_id: String,
+    /// A deliberate operator recovery route. It remains bound to the current
+    /// medium/generation and expires exactly like a receipt-backed format.
+    pub force_reformat: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,6 +51,7 @@ pub fn issue_authorization(
         expires_at: now + Duration::from_secs(60),
         run_id: run_id.into(),
         profile_id: profile_id.into(),
+        force_reformat: run_id.starts_with("force-reformat:"),
     })
 }
 
@@ -174,5 +178,20 @@ mod tests {
             Ok(authorization)
         );
         assert!(authorizations.is_empty());
+    }
+
+    #[test]
+    fn force_reformat_authorization_is_explicitly_marked() {
+        let authorization = issue_authorization(
+            "v1:registered-card",
+            3,
+            "force-reformat:operator-recovery",
+            "sdxc-default",
+            true,
+            true,
+            SystemTime::now(),
+        )
+        .expect("authorization");
+        assert!(authorization.force_reformat);
     }
 }
