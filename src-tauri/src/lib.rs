@@ -12,15 +12,19 @@ pub mod format_safety;
 pub mod identity;
 pub mod ingest;
 pub mod local_store;
+#[cfg(target_os = "macos")]
+mod macos_disk_arbitration;
 pub mod metadata;
 pub mod organization;
 pub mod reader_slots;
 pub mod storage_marker;
 
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
@@ -46,13 +50,17 @@ use crate::local_store::{
 };
 use crate::metadata::inspect;
 use crate::organization::{
-    camera_identity, custom_directory_prefix, destination_relative_path_with_order,
+    camera_identity, custom_directory_prefix, destination_relative_path_with_order_and_offset,
     CustomDirectoryField, DestinationDepthSegment, SortMode,
 };
 
 pub const IPC_CONTRACT_VERSION: u16 = 1;
 static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static PROGRESS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// The copy engine may complete many 1 MiB reads in one display frame. Keep
+/// native progress exact while placing a firm upper bound on IPC and React
+/// work for each active ingest.
+const PROGRESS_EVENT_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
 struct AppState {
     store: Arc<Mutex<LocalStore>>,
@@ -81,6 +89,25 @@ struct ActiveIngest {
 struct CancellationRegistration {
     active_ingests: Arc<Mutex<HashMap<String, ActiveIngest>>>,
     operation_id: String,
+}
+
+struct ProgressEmissionGate {
+    last_emitted: Mutex<Option<Instant>>,
+}
+
+impl ProgressEmissionGate {
+    fn should_emit(&self, now: Instant) -> bool {
+        let Ok(mut last_emitted) = self.last_emitted.lock() else {
+            // A poisoned UI-reporting mutex must never prevent a verified copy
+            // from proceeding. Dropping this non-authoritative event is safe.
+            return false;
+        };
+        if last_emitted.is_some_and(|last| now.duration_since(last) < PROGRESS_EVENT_MIN_INTERVAL) {
+            return false;
+        }
+        *last_emitted = Some(now);
+        true
+    }
 }
 
 impl Drop for CancellationRegistration {
@@ -517,11 +544,30 @@ impl DeviceSnapshotProvider for DeterministicDeviceSnapshotProvider {
 }
 
 #[tauri::command]
-fn get_device_snapshot(state: State<'_, AppState>) -> IpcResponse<DeviceSnapshot> {
-    IpcResponse::success(native_device_snapshot(
-        &state.store,
-        &state.connection_generations,
-    ))
+async fn get_device_snapshot(
+    state: State<'_, AppState>,
+) -> Result<IpcResponse<DeviceSnapshot>, IpcError> {
+    Ok(
+        match blocking_native_device_snapshot(
+            Arc::clone(&state.store),
+            Arc::clone(&state.connection_generations),
+        )
+        .await
+        {
+            Ok(snapshot) => {
+                debug!(
+                    target: "media_ingest_tool::support",
+                    "device_snapshot_complete device_count={}",
+                    snapshot.devices.len()
+                );
+                IpcResponse::success(snapshot)
+            }
+            Err(()) => IpcResponse::failure(
+                IpcErrorCode::OperationCancelled,
+                "The native device snapshot worker ended before completing discovery",
+            ),
+        },
+    )
 }
 
 #[tauri::command]
@@ -542,37 +588,62 @@ fn get_ingest_history(state: State<'_, AppState>) -> IpcResponse<Vec<IngestHisto
 }
 
 #[tauri::command]
-fn scan_source_inventory(
+async fn scan_source_inventory(
     request: SourceInventoryRequest,
     state: State<'_, AppState>,
-) -> IpcResponse<SourceInventory> {
-    let snapshot = native_device_snapshot(&state.store, &state.connection_generations);
-    if !source_inventory_matches_current_device(&snapshot, &request) {
-        return IpcResponse::failure(
-            IpcErrorCode::DeviceUnavailable,
-            "The selected mounted source card is no longer present",
-        );
-    }
-    match enumerate_regular_files(&PathBuf::from(request.source_root)) {
-        Ok(files) => IpcResponse::success(SourceInventory {
-            file_count: files.len(),
-            total_bytes: files.iter().map(|file| file.byte_length).sum(),
-        }),
-        Err(IngestError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            IpcResponse::failure(
-                IpcErrorCode::DeviceUnavailable,
-                "The source contains protected entries; no ingest plan was created",
-            )
-        }
-        Err(IngestError::SourceLimitExceeded) => IpcResponse::failure(
-            IpcErrorCode::InvalidRequest,
-            "The source exceeds the safe media inventory limit",
-        ),
-        Err(_) => IpcResponse::failure(
-            IpcErrorCode::DeviceUnavailable,
-            "The source inventory could not be read safely",
-        ),
-    }
+) -> Result<IpcResponse<SourceInventory>, IpcError> {
+    let store = Arc::clone(&state.store);
+    let connection_generations = Arc::clone(&state.connection_generations);
+    Ok(
+        match tauri::async_runtime::spawn_blocking(move || {
+            let snapshot = native_device_snapshot(&store, &connection_generations);
+            if !source_inventory_matches_current_device(&snapshot, &request) {
+                return IpcResponse::failure(
+                    IpcErrorCode::DeviceUnavailable,
+                    "The selected mounted source card is no longer present",
+                );
+            }
+            match enumerate_regular_files(&PathBuf::from(request.source_root)) {
+                Ok(files) => {
+                    let inventory = SourceInventory {
+                        file_count: files.len(),
+                        total_bytes: files.iter().map(|file| file.byte_length).sum(),
+                    };
+                    debug!(
+                        target: "media_ingest_tool::support",
+                        "source_inventory_complete file_count={} total_bytes={}",
+                        inventory.file_count,
+                        inventory.total_bytes
+                    );
+                    IpcResponse::success(inventory)
+                }
+                Err(IngestError::Io(error))
+                    if error.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    IpcResponse::failure(
+                        IpcErrorCode::DeviceUnavailable,
+                        "The source contains protected entries; no ingest plan was created",
+                    )
+                }
+                Err(IngestError::SourceLimitExceeded) => IpcResponse::failure(
+                    IpcErrorCode::InvalidRequest,
+                    "The source exceeds the safe media inventory limit",
+                ),
+                Err(_) => IpcResponse::failure(
+                    IpcErrorCode::DeviceUnavailable,
+                    "The source inventory could not be read safely",
+                ),
+            }
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => IpcResponse::failure(
+                IpcErrorCode::OperationCancelled,
+                "The source inventory worker ended before completing the scan",
+            ),
+        },
+    )
 }
 
 #[tauri::command]
@@ -782,11 +853,37 @@ fn register_card_marker(
 /// current marker. The marker remains convenience evidence, never a format
 /// authorization or hardware-identity substitute.
 #[tauri::command]
-fn get_auto_ingest_profile(
+async fn get_auto_ingest_profile(
     source_medium_key: String,
     state: State<'_, AppState>,
+) -> Result<IpcResponse<CardRegistration>, IpcError> {
+    let store = Arc::clone(&state.store);
+    let connection_generations = Arc::clone(&state.connection_generations);
+    Ok(
+        match tauri::async_runtime::spawn_blocking(move || {
+            get_auto_ingest_profile_blocking(
+                source_medium_key,
+                store.as_ref(),
+                connection_generations.as_ref(),
+            )
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => IpcResponse::failure(
+                IpcErrorCode::OperationCancelled,
+                "The auto-ingest profile worker ended before completing the lookup",
+            ),
+        },
+    )
+}
+
+fn get_auto_ingest_profile_blocking(
+    source_medium_key: String,
+    store: &Mutex<LocalStore>,
+    connection_generations: &Mutex<ConnectionGenerationTracker>,
 ) -> IpcResponse<CardRegistration> {
-    let snapshot = native_device_snapshot(&state.store, &state.connection_generations);
+    let snapshot = native_device_snapshot(store, connection_generations);
     let current = snapshot
         .devices
         .iter()
@@ -828,7 +925,7 @@ fn get_auto_ingest_profile(
             })
         }
     };
-    let Ok(store) = state.store.lock() else {
+    let Ok(store) = store.lock() else {
         return IpcResponse::failure(
             IpcErrorCode::DeviceUnavailable,
             "The local card registration store is unavailable",
@@ -1152,15 +1249,6 @@ fn request_force_format_authorization(
             "The selected card is no longer uniquely present",
         );
     };
-    if !matches!(
-        device.identity.confidence,
-        IdentityConfidence::HardwareImmutable | IdentityConfidence::HardwareStable
-    ) {
-        return IpcResponse::failure(
-            IpcErrorCode::DeviceUnavailable,
-            "Force reformat needs a hardware-stable current card identity",
-        );
-    }
     if state
         .active_ingests
         .lock()
@@ -1174,26 +1262,6 @@ fn request_force_format_authorization(
         return IpcResponse::failure(
             IpcErrorCode::DeviceUnavailable,
             "The source medium is still participating in an ingest",
-        );
-    }
-    let Ok(Some(marker)) =
-        crate::storage_marker::read_record(Path::new(&device.details.mount_locations[0]))
-    else {
-        return IpcResponse::failure(
-            IpcErrorCode::DeviceUnavailable,
-            "Force reformat is limited to a currently registered managed card",
-        );
-    };
-    let registered = state
-        .store
-        .lock()
-        .ok()
-        .and_then(|store| store.marker_ingest_profile(&marker.token).ok().flatten())
-        .is_some();
-    if !registered {
-        return IpcResponse::failure(
-            IpcErrorCode::DeviceUnavailable,
-            "Force reformat is limited to a currently registered managed card",
         );
     }
     let Some(profile) = recommended_profile(device.details.total_bytes) else {
@@ -1400,7 +1468,11 @@ fn execute_format_authorization(
             .map_err(|_| crate::format_provider::FormatProviderError::ValidationFailed)?;
         let post_format = native_device_snapshot(&store, &connection_generations);
         let exact_target_present = post_format.devices.iter().any(|device| {
-            same_managed_format_target(&pre_format_device, device, &validated.root, capacity)
+            if authorization.force_reformat {
+                same_force_format_target(device, &validated.root, capacity)
+            } else {
+                same_managed_format_target(&pre_format_device, device, &validated.root, capacity)
+            }
         });
         if !exact_target_present {
             return Err(crate::format_provider::FormatProviderError::TargetChanged);
@@ -1568,6 +1640,17 @@ fn native_device_snapshot(
         assign_connection_generations(&mut snapshot, &mut tracker);
     }
     snapshot
+}
+
+async fn blocking_native_device_snapshot(
+    store: Arc<Mutex<LocalStore>>,
+    connection_generations: Arc<Mutex<ConnectionGenerationTracker>>,
+) -> Result<DeviceSnapshot, ()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        native_device_snapshot(&store, &connection_generations)
+    })
+    .await
+    .map_err(|_| ())
 }
 
 fn seed_connection_generations(
@@ -1744,12 +1827,107 @@ fn watch_device_snapshots(
     }
 }
 
-/// macOS and Linux do not have an event subscription wired into this binary
-/// yet, but they must still drive registered-card auto-ingest. Reconcile the
-/// native snapshot at a bounded cadence rather than treating a one-time UI
-/// refresh as a mount event. The worker holds no target supplied by the
-/// webview and ends as soon as its channel is closed.
-#[cfg(not(windows))]
+/// macOS registers Disk Arbitration callbacks before its initial snapshot.
+/// The callback carries no disk target: it merely wakes this worker to take a
+/// fresh native snapshot. The existing structured `diskutil` adapter remains
+/// a bounded fallback until native description-to-volume projection has
+/// hardware evidence.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn watch_device_snapshots(
+    channel: Channel<DeviceSnapshot>,
+    state: State<'_, AppState>,
+) -> IpcResponse<()> {
+    use std::sync::mpsc::{sync_channel, RecvTimeoutError};
+
+    let store = Arc::clone(&state.store);
+    let connection_generations = Arc::clone(&state.connection_generations);
+    let active_ingests = Arc::clone(&state.active_ingests);
+    let native_channel = channel.clone();
+    let (ready_tx, ready_rx) = sync_channel(1);
+    std::thread::spawn(move || {
+        let (subscription, events) = match macos_disk_arbitration::subscribe(1) {
+            Ok(subscription) => {
+                let _ = ready_tx.send(true);
+                subscription
+            }
+            Err(error) => {
+                warn!(
+                    target: "media_ingest::macos::discovery",
+                    "Disk Arbitration lifecycle subscription unavailable; using bounded snapshot fallback ({error})"
+                );
+                let _ = ready_tx.send(false);
+                return;
+            }
+        };
+        if !send_reconciled_device_snapshot(
+            &native_channel,
+            &store,
+            &connection_generations,
+            &active_ingests,
+        ) {
+            return;
+        }
+        loop {
+            match events.recv_timeout(Duration::from_secs(30)) {
+                Ok(request) => {
+                    if !send_reconciled_device_snapshot(
+                        &native_channel,
+                        &store,
+                        &connection_generations,
+                        &active_ingests,
+                    ) {
+                        break;
+                    }
+                    subscription.acknowledge(request);
+                }
+                // A periodic snapshot catches missed callbacks, queue loss,
+                // and sleep/wake without making polling the primary detector.
+                Err(RecvTimeoutError::Timeout) => {
+                    if !send_reconciled_device_snapshot(
+                        &native_channel,
+                        &store,
+                        &connection_generations,
+                        &active_ingests,
+                    ) {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+    match ready_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(true) => IpcResponse::success(()),
+        // Preserve a usable mounted-volume inventory if the native lifecycle
+        // service is unavailable. This still runs solely in Rust and never
+        // trusts a webview-supplied mount path.
+        Ok(false) | Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
+            let store = Arc::clone(&state.store);
+            let connection_generations = Arc::clone(&state.connection_generations);
+            let active_ingests = Arc::clone(&state.active_ingests);
+            std::thread::spawn(move || loop {
+                if !send_reconciled_device_snapshot(
+                    &channel,
+                    &store,
+                    &connection_generations,
+                    &active_ingests,
+                ) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(30));
+            });
+            IpcResponse::success(())
+        }
+    }
+}
+
+/// Linux does not have an event subscription wired into this binary yet, but
+/// it must still drive registered-card auto-ingest. Reconcile the native
+/// snapshot at a bounded cadence rather than treating a one-time UI refresh as
+/// a mount event. The worker holds no target supplied by the webview and ends
+/// as soon as its channel is closed.
+#[cfg(all(not(windows), not(target_os = "macos")))]
 #[tauri::command]
 fn watch_device_snapshots(
     channel: Channel<DeviceSnapshot>,
@@ -1814,7 +1992,20 @@ async fn preview_verified_ingest(
     mut request: VerifiedIngestRequest,
     state: State<'_, AppState>,
 ) -> Result<IpcResponse<IngestPlanPreview>, IpcError> {
-    let snapshot = native_device_snapshot(&state.store, &state.connection_generations);
+    let snapshot = match blocking_native_device_snapshot(
+        Arc::clone(&state.store),
+        Arc::clone(&state.connection_generations),
+    )
+    .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(()) => {
+            return Ok(IpcResponse::failure(
+                IpcErrorCode::OperationCancelled,
+                "The native device snapshot worker ended before planning",
+            ))
+        }
+    };
     let Some(observed) = current_source_for_ingest_request(&snapshot, &request) else {
         return Ok(IpcResponse::failure(
             IpcErrorCode::DeviceUnavailable,
@@ -1918,7 +2109,15 @@ async fn resume_verified_ingest(
             "The interrupted run has no complete frozen file plan",
         ));
     }
-    let snapshot = native_device_snapshot(&state.store, &state.connection_generations);
+    let snapshot = match blocking_native_device_snapshot(
+        Arc::clone(&state.store),
+        Arc::clone(&state.connection_generations),
+    )
+    .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(()) => return Ok(persistence_failure()),
+    };
     let Some(observed) = current_source_for_recovery(&snapshot, &recovery) else {
         return Ok(IpcResponse::failure(
             IpcErrorCode::DeviceUnavailable,
@@ -1936,19 +2135,23 @@ async fn resume_verified_ingest(
         .iter()
         .map(|file| file.source.byte_length)
         .sum::<u64>();
-    if let Err(error) = validate_ingest_roots(&prepared.source_root, &prepared.destination_root)
-        .and_then(|()| has_destination_space(&prepared.destination_root, planned_bytes))
-        .and_then(|has_space| {
-            has_space
-                .then_some(())
-                .ok_or(IngestError::InsufficientDestinationSpace)
-        })
+    let preflight_source_root = prepared.source_root.clone();
+    let preflight_destination_root = prepared.destination_root.clone();
+    let destination_key = match tauri::async_runtime::spawn_blocking(move || {
+        validate_ingest_roots(&preflight_source_root, &preflight_destination_root)
+            .and_then(|()| has_destination_space(&preflight_destination_root, planned_bytes))
+            .and_then(|has_space| {
+                has_space
+                    .then_some(())
+                    .ok_or(IngestError::InsufficientDestinationSpace)
+            })
+            .and_then(|()| destination_lease_key(&preflight_destination_root))
+    })
+    .await
     {
-        return Ok(error_response(error));
-    }
-    let destination_key = match destination_lease_key(&prepared.destination_root) {
-        Ok(key) => key,
-        Err(error) => return Ok(error_response(error)),
+        Ok(Ok(key)) => key,
+        Ok(Err(error)) => return Ok(error_response(error)),
+        Err(_) => return Ok(persistence_failure()),
     };
     let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
@@ -2000,8 +2203,12 @@ async fn resume_verified_ingest(
     let verified_transferred = Arc::new(AtomicU64::new(0));
     let verified_by_worker = Arc::clone(&verified_transferred);
     let destination_leases = Arc::clone(&state.destination_leases);
+    let progress_gate = Arc::new(ProgressEmissionGate {
+        last_emitted: Mutex::new(None),
+    });
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _destination_lease = destination_leases.acquire(destination_key);
+        let progress_gate = Arc::clone(&progress_gate);
         let progress: CopyProgressCallback = Arc::new(move |update| {
             let total = match update.stage {
                 CopyProgressStage::Copying => {
@@ -2011,7 +2218,8 @@ async fn resume_verified_ingest(
                     verified_by_worker.fetch_add(update.bytes, Ordering::Relaxed) + update.bytes
                 }
             };
-            send_copy_progress(
+            send_throttled_copy_progress(
+                &progress_gate,
                 &copy_channel,
                 &progress_operation_id,
                 total,
@@ -2113,7 +2321,15 @@ async fn start_verified_ingest(
     channel: Channel<ProgressUpdate>,
     state: State<'_, AppState>,
 ) -> Result<IpcResponse<VerifiedIngestResult>, IpcError> {
-    let current_snapshot = native_device_snapshot(&state.store, &state.connection_generations);
+    let current_snapshot = match blocking_native_device_snapshot(
+        Arc::clone(&state.store),
+        Arc::clone(&state.connection_generations),
+    )
+    .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(()) => return Ok(persistence_failure()),
+    };
     let Some(observed_source) = current_source_for_ingest_request(&current_snapshot, &request)
     else {
         return Ok(IpcResponse::failure(
@@ -2130,6 +2346,13 @@ async fn start_verified_ingest(
         .and_then(|value| uuid::Uuid::parse_str(value).ok())
         .map(|value| value.to_string())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    info!(
+        target: "media_ingest_tool::support",
+        "ingest_start_requested operation_id={} worker_limit={} automatic={}",
+        operation_id,
+        request.max_workers,
+        request.auto_ingest_triggered
+    );
     let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let Ok(mut active_ingests) = state.active_ingests.lock() else {
@@ -2205,27 +2428,22 @@ async fn start_verified_ingest(
         send_progress(&channel, &operation_id, IngestState::Completed, 0, Some(0));
         return Ok(IpcResponse::success(summary));
     }
-    let preflight = validate_ingest_roots(&prepared.source_root, &prepared.destination_root)
-        .and_then(|()| {
-            has_destination_space(&prepared.destination_root, planned_bytes).and_then(|has_space| {
+    let preflight_source_root = prepared.source_root.clone();
+    let preflight_destination_root = prepared.destination_root.clone();
+    let destination_key = match tauri::async_runtime::spawn_blocking(move || {
+        validate_ingest_roots(&preflight_source_root, &preflight_destination_root)
+            .and_then(|()| has_destination_space(&preflight_destination_root, planned_bytes))
+            .and_then(|has_space| {
                 has_space
                     .then_some(())
                     .ok_or(IngestError::InsufficientDestinationSpace)
             })
-        });
-    if let Err(error) = preflight {
-        send_progress(
-            &channel,
-            &operation_id,
-            progress_state_for_error(&error),
-            0,
-            Some(planned_bytes),
-        );
-        return Ok(error_response(error));
-    }
-    let destination_key = match destination_lease_key(&prepared.destination_root) {
-        Ok(key) => key,
-        Err(error) => {
+            .and_then(|()| destination_lease_key(&preflight_destination_root))
+    })
+    .await
+    {
+        Ok(Ok(key)) => key,
+        Ok(Err(error)) => {
             send_progress(
                 &channel,
                 &operation_id,
@@ -2234,6 +2452,19 @@ async fn start_verified_ingest(
                 Some(planned_bytes),
             );
             return Ok(error_response(error));
+        }
+        Err(_) => {
+            send_progress(
+                &channel,
+                &operation_id,
+                IngestState::Failed,
+                0,
+                Some(planned_bytes),
+            );
+            return Ok(IpcResponse::failure(
+                IpcErrorCode::OperationCancelled,
+                "The ingest preflight worker ended before copying could start",
+            ));
         }
     };
     send_progress(
@@ -2318,8 +2549,12 @@ async fn start_verified_ingest(
     let verified_transferred = Arc::new(AtomicU64::new(0));
     let verified_by_worker = Arc::clone(&verified_transferred);
     let destination_leases = Arc::clone(&state.destination_leases);
+    let progress_gate = Arc::new(ProgressEmissionGate {
+        last_emitted: Mutex::new(None),
+    });
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _destination_lease = destination_leases.acquire(destination_key);
+        let progress_gate = Arc::clone(&progress_gate);
         let progress: CopyProgressCallback = Arc::new(move |update| {
             let total = match update.stage {
                 CopyProgressStage::Copying => {
@@ -2329,7 +2564,8 @@ async fn start_verified_ingest(
                     verified_by_worker.fetch_add(update.bytes, Ordering::Relaxed) + update.bytes
                 }
             };
-            send_copy_progress(
+            send_throttled_copy_progress(
+                &progress_gate,
                 &copy_channel,
                 &progress_operation_id,
                 total,
@@ -2407,9 +2643,23 @@ async fn start_verified_ingest(
                 completed.summary.copied_bytes,
                 Some(planned_bytes),
             );
+            info!(
+                target: "media_ingest_tool::support",
+                "ingest_completed operation_id={} copied_files={} copied_bytes={} auto_format_status={:?}",
+                operation_id,
+                completed.summary.copied_files,
+                completed.summary.copied_bytes,
+                completed.summary.auto_format_status
+            );
             Ok(IpcResponse::success(completed.summary))
         }
         Ok(Err(error)) => {
+            warn!(
+                target: "media_ingest_tool::support",
+                "ingest_recovery_required operation_id={} outcome={:?}",
+                operation_id,
+                error
+            );
             if let Ok(mut store) = state.store.lock() {
                 let _ = store.return_to_recovery_required(
                     &operation_id,
@@ -2426,6 +2676,11 @@ async fn start_verified_ingest(
             Ok(error_response(error))
         }
         Err(_) => {
+            warn!(
+                target: "media_ingest_tool::support",
+                "ingest_worker_ended operation_id={}",
+                operation_id
+            );
             if let Ok(mut store) = state.store.lock() {
                 let _ = store.return_to_recovery_required(
                     &operation_id,
@@ -2523,6 +2778,28 @@ fn send_copy_progress(
     });
 }
 
+/// Copy/hash workers can produce an event for every buffer. Coalesce only the
+/// presentation layer; the atomic byte totals and terminal lifecycle events
+/// remain exact and are never used as transfer authority.
+fn send_throttled_copy_progress(
+    gate: &ProgressEmissionGate,
+    channel: &Channel<ProgressUpdate>,
+    operation_id: &str,
+    transferred_bytes: u64,
+    total_bytes: Option<u64>,
+    update: CopyProgress,
+) {
+    if gate.should_emit(Instant::now()) {
+        send_copy_progress(
+            channel,
+            operation_id,
+            transferred_bytes,
+            total_bytes,
+            update,
+        );
+    }
+}
+
 #[tauri::command]
 fn cancel_verified_ingest(operation_id: String, state: State<'_, AppState>) -> IpcResponse<()> {
     let Ok(active_ingests) = state.active_ingests.lock() else {
@@ -2538,6 +2815,11 @@ fn cancel_verified_ingest(operation_id: String, state: State<'_, AppState>) -> I
         );
     };
     active.cancellation.store(true, Ordering::Release);
+    info!(
+        target: "media_ingest_tool::support",
+        "ingest_cancellation_requested operation_id={}",
+        operation_id
+    );
     IpcResponse::success(())
 }
 
@@ -2906,7 +3188,7 @@ fn same_managed_format_target(
     after.state == DeviceState::Available
         && after.details.total_bytes == Some(expected_capacity)
         && after.details.mount_locations.len() == 1
-        && PathBuf::from(&after.details.mount_locations[0]) == validated_root
+        && Path::new(&after.details.mount_locations[0]) == validated_root
         && ((before.identity.confidence == IdentityConfidence::HardwareImmutable
             && after.identity.confidence == IdentityConfidence::HardwareImmutable
             && after.identity.media_key == before.identity.media_key)
@@ -2914,6 +3196,22 @@ fn same_managed_format_target(
                 && before.details.reader_fingerprint == after.details.reader_fingerprint
                 && before.details.reader_slot.is_some()
                 && before.details.reader_slot == after.details.reader_slot))
+}
+
+/// The recovery route intentionally bypasses receipt, marker, and media
+/// continuity evidence. The provider has already revalidated the native
+/// opaque target immediately before formatting; after remount we retain only
+/// the target's removable-volume availability, exact validated mount, and
+/// capacity checks. It never permits an arbitrary path from the webview.
+fn same_force_format_target(
+    after: &StorageDevice,
+    validated_root: &std::path::Path,
+    expected_capacity: u64,
+) -> bool {
+    after.state == DeviceState::Available
+        && after.details.total_bytes == Some(expected_capacity)
+        && after.details.mount_locations.len() == 1
+        && Path::new(&after.details.mount_locations[0]) == validated_root
 }
 
 /// Runs only after the receipt transaction has sealed and only for a card the
@@ -3201,10 +3499,11 @@ fn plan_copy_files(
                 metadata.body_serial.as_deref(),
                 operation_id,
             );
-            let initial = destination_relative_path_with_order(
+            let initial = destination_relative_path_with_order_and_offset(
                 &source.relative_path.to_string_lossy(),
                 &camera,
                 metadata.capture_time,
+                metadata.capture_offset_known,
                 mode.clone(),
                 &request.custom_directory_fields,
                 request.destination_depth_order.as_deref(),
@@ -3547,12 +3846,37 @@ fn apply_calibrated_slots(snapshot: &mut DeviceSnapshot, store: &LocalStore) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .clear_targets()
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("media-ingest-tool".into()),
+                    }),
+                ])
+                .level(log::LevelFilter::Debug)
+                .max_file_size(5 * 1024 * 1024)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
+                .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            info!(
+                target: "media_ingest_tool::support",
+                "application_start version={} platform={} verbose_support_logging=true",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS
+            );
             let data_directory = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_directory)?;
             let mut store = LocalStore::open(data_directory.join("media-ingest.sqlite3"))?;
             store.reconcile_interrupted_runs()?;
+            info!(
+                target: "media_ingest_tool::support",
+                "local_store_ready interrupted_runs_reconciled=true"
+            );
             app.manage(AppState {
                 store: Arc::new(Mutex::new(store)),
                 active_ingests: Arc::new(Mutex::new(HashMap::new())),
@@ -3609,6 +3933,17 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_gate_bounds_rapid_worker_events_without_delaying_the_next_cadence() {
+        let gate = ProgressEmissionGate {
+            last_emitted: Mutex::new(None),
+        };
+        let now = Instant::now();
+        assert!(gate.should_emit(now));
+        assert!(!gate.should_emit(now + Duration::from_millis(99)));
+        assert!(gate.should_emit(now + PROGRESS_EVENT_MIN_INTERVAL));
+    }
 
     #[test]
     fn fake_snapshot_is_deterministic_and_empty() {
@@ -3840,6 +4175,44 @@ mod tests {
 
         let unresolved = source_identity_record("v1:reader-slot", IdentityConfidence::Unresolved);
         assert!(!allows_destination_recall(&unresolved));
+    }
+
+    #[test]
+    fn force_reformat_postcheck_accepts_a_current_unresolved_removable_mount() {
+        let device = StorageDevice {
+            state: DeviceState::Available,
+            connection_generation: 4,
+            identity: DeviceIdentity {
+                media_key: "session:unresolved-card".into(),
+                confidence: IdentityConfidence::Unresolved,
+                evidence: Vec::new(),
+            },
+            details: StorageDeviceDetails {
+                display_name: "unregistered card".into(),
+                filesystem: Some("exFAT".into()),
+                total_bytes: Some(64_000_000_000),
+                available_bytes: Some(32_000_000_000),
+                mount_locations: vec!["F:\\".into()],
+                reader_fingerprint: None,
+                reader_family: None,
+                reader_slot: None,
+            },
+        };
+        assert!(same_force_format_target(
+            &device,
+            Path::new("F:\\"),
+            64_000_000_000
+        ));
+        assert!(!same_force_format_target(
+            &device,
+            Path::new("G:\\"),
+            64_000_000_000
+        ));
+        assert!(!same_force_format_target(
+            &device,
+            Path::new("F:\\"),
+            32_000_000_000
+        ));
     }
 
     #[test]
@@ -4649,15 +5022,8 @@ mod tests {
             let camera = components
                 .iter()
                 .position(|component| component.contains("__"));
-            let photographer = components
-                .iter()
-                .position(|component| component == "Photographer");
-            let photographer_value = components.iter().position(|component| component == "Ari");
-            camera.is_some_and(|camera| {
-                photographer.is_some_and(|field| {
-                    photographer_value.is_some_and(|value| camera < field && field < value)
-                })
-            })
+            let photographer = components.iter().position(|component| component == "Ari");
+            camera.is_some_and(|camera| photographer.is_some_and(|field| camera < field))
         }));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
@@ -4699,11 +5065,19 @@ mod tests {
             .components()
             .map(|component| component.as_os_str().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert_eq!(&components[..2], ["Photographer", "Ari"]);
-        assert!(components[2].starts_with("20"));
-        assert!(components[3].contains("__"));
-        assert!(components[4].contains("_"));
-        assert_eq!(components[5], "clip.mov");
+        assert_eq!(components[0], "Ari");
+        assert!(components[1].contains('T'));
+        assert!(matches!(
+            components[1].as_bytes().get(15),
+            Some(b'+' | b'-')
+        ));
+        assert!(components[2].contains("__"));
+        assert!(components[3].contains('T'));
+        assert!(matches!(
+            components[3].as_bytes().get(15),
+            Some(b'+' | b'-')
+        ));
+        assert_eq!(components[4], "clip.mov");
 
         let completed = execute_prepared_ingest(
             prepared,
@@ -4787,12 +5161,12 @@ mod tests {
                 .components()
                 .map(|component| component.as_os_str().to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
-            assert_eq!(&components[..2], ["Photographer", "Ari"]);
-            assert!(components[2].starts_with("FX3__"));
-            assert_eq!(components[3], "2026-08-28");
+            assert_eq!(components[0], "Ari");
+            assert!(components[1].starts_with("FX3__"));
+            assert_eq!(components[2], "20260828T000000+0800");
             assert!(matches!(
-                components[4].as_str(),
-                "10-00_+0800" | "10-30_+0800" | "11-00_+0800"
+                components[3].as_str(),
+                "20260828T100000+0800" | "20260828T103000+0800" | "20260828T110000+0800"
             ));
             assert!(copy.final_path.is_file());
         }

@@ -828,14 +828,34 @@ mod platform {
     /// is interpreted. The snapshot worker reconciles this native view every
     /// second; event-driven Disk Arbitration remains required for certification.
     pub fn enumerate_removable_volumes() -> Vec<DiscoveredVolume> {
-        let Ok(output) = Command::new(DISKUTIL).args(["list", "-plist"]).output() else {
-            return Vec::new();
+        let output = match Command::new(DISKUTIL).args(["list", "-plist"]).output() {
+            Ok(output) => output,
+            Err(error) => {
+                log::warn!(
+                    target: "media_ingest::macos::discovery",
+                    "diskutil list invocation failed (error kind: {:?})",
+                    error.kind()
+                );
+                return Vec::new();
+            }
         };
         if !output.status.success() {
+            log::warn!(
+                target: "media_ingest::macos::discovery",
+                "diskutil list returned an unsuccessful status (exit code: {:?})",
+                output.status.code()
+            );
             return Vec::new();
         }
-        let Ok(root) = Value::from_reader_xml(output.stdout.as_slice()) else {
-            return Vec::new();
+        let root = match Value::from_reader_xml(output.stdout.as_slice()) {
+            Ok(root) => root,
+            Err(_) => {
+                log::warn!(
+                    target: "media_ingest::macos::discovery",
+                    "diskutil list returned an unreadable property list"
+                );
+                return Vec::new();
+            }
         };
         let mut seen_mounts = HashSet::new();
         disk_entries(&root)
@@ -849,8 +869,10 @@ mod platform {
                 let direct = std::iter::once(dictionary);
                 let nested = dictionary
                     .get("AllDisksAndPartitions")
-                    .and_then(Value::as_array)
                     .into_iter()
+                    .chain(dictionary.get("Partitions"))
+                    .chain(dictionary.get("APFSVolumes"))
+                    .filter_map(Value::as_array)
                     .flatten()
                     .flat_map(disk_entries);
                 Box::new(direct.chain(nested))
@@ -869,7 +891,7 @@ mod platform {
         }
         let identifier = entry.get("DeviceIdentifier")?.as_string()?;
         let info = disk_info(identifier)?;
-        if !info.removable || info.internal || info.read_only || !Path::new(&mount).is_dir() {
+        if !info.removable || info.internal || !info.writable || !Path::new(&mount).is_dir() {
             return None;
         }
         let mount_path = Path::new(&mount);
@@ -885,9 +907,17 @@ mod platform {
             total_space(mount_path).ok().or(info.capacity_bytes),
             available_space(mount_path).ok(),
         );
-        volume.marker_token = crate::storage_marker::read_marker(mount_path)
-            .ok()
-            .flatten();
+        volume.marker_token = match crate::storage_marker::read_marker(mount_path) {
+            Ok(marker) => marker,
+            Err(error) => {
+                log::debug!(
+                    target: "media_ingest::macos::discovery",
+                    "managed-card marker could not be read (error kind: {:?})",
+                    error.kind()
+                );
+                None
+            }
+        };
         volume.reader_topology = Some(ReaderTopology {
             vendor: info.vendor,
             product: info.model,
@@ -907,7 +937,7 @@ mod platform {
         capacity_bytes: Option<u64>,
         removable: bool,
         internal: bool,
-        read_only: bool,
+        writable: bool,
         vendor: Option<String>,
         model: Option<String>,
     }
@@ -921,13 +951,33 @@ mod platform {
         let output = Command::new(DISKUTIL)
             .args(["info", "-plist", identifier])
             .output()
+            .map_err(|error| {
+                log::debug!(
+                    target: "media_ingest::macos::discovery",
+                    "diskutil info invocation failed (error kind: {:?})",
+                    error.kind()
+                );
+            })
             .ok()?;
         if !output.status.success() {
+            log::debug!(
+                target: "media_ingest::macos::discovery",
+                "diskutil info returned an unsuccessful status (exit code: {:?})",
+                output.status.code()
+            );
             return None;
         }
-        let dictionary = Value::from_reader_xml(output.stdout.as_slice())
-            .ok()?
-            .into_dictionary()?;
+        let dictionary = match Value::from_reader_xml(output.stdout.as_slice()) {
+            Ok(value) => value,
+            Err(_) => {
+                log::debug!(
+                    target: "media_ingest::macos::discovery",
+                    "diskutil info returned an unreadable property list"
+                );
+                return None;
+            }
+        }
+        .into_dictionary()?;
         disk_info_from_plist(&dictionary)
     }
 
@@ -938,9 +988,22 @@ mod platform {
             filesystem: string(&dictionary, "FilesystemType"),
             volume_uuid: string(&dictionary, "VolumeUUID"),
             capacity_bytes: Some(capacity_bytes),
-            removable: boolean(&dictionary, "RemovableMediaOrExternal"),
+            // `diskutil info -plist` names the aggregate field
+            // `RemovableMediaOrExternalDevice`. Preserve the older/component
+            // spellings as defensive compatibility aliases. An SD card behind
+            // a USB reader is normally a mounted partition under `Partitions`,
+            // not a whole-disk entry. Explicitly virtual disks never qualify.
+            removable: (boolean(&dictionary, "RemovableMediaOrExternalDevice")
+                || boolean(&dictionary, "RemovableMediaOrExternal")
+                || boolean(&dictionary, "RemovableMedia")
+                || boolean(&dictionary, "Ejectable"))
+                && !string(&dictionary, "VirtualOrPhysical")
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("virtual")),
             internal: boolean(&dictionary, "Internal"),
-            read_only: boolean(&dictionary, "ReadOnlyVolume"),
+            // A missing writable field is not evidence that source files are
+            // readable. Refuse it rather than relying on a negated, absent
+            // `ReadOnlyVolume` field.
+            writable: boolean(&dictionary, "WritableVolume"),
             vendor: string(&dictionary, "DeviceVendor"),
             model: string(&dictionary, "MediaName").or_else(|| string(&dictionary, "DeviceModel")),
         })
@@ -964,12 +1027,54 @@ mod platform {
         use super::*;
 
         #[test]
+        fn visits_partition_entries_under_an_external_disk() {
+            let root = Value::from_reader_xml(
+                br#"<?xml version="1.0"?><plist version="1.0"><dict>
+                    <key>AllDisksAndPartitions</key><array><dict>
+                        <key>DeviceIdentifier</key><string>disk4</string>
+                        <key>Partitions</key><array><dict>
+                            <key>DeviceIdentifier</key><string>disk4s1</string>
+                            <key>MountPoint</key><string>/Volumes/CAMERA</string>
+                        </dict></array>
+                    </dict></array>
+                </dict></plist>"#,
+            )
+            .expect("fixture plist");
+            let identifiers = disk_entries(&root)
+                .filter_map(|entry| entry.get("DeviceIdentifier"))
+                .filter_map(Value::as_string)
+                .collect::<Vec<_>>();
+            assert_eq!(identifiers, vec!["disk4", "disk4s1"]);
+        }
+
+        #[test]
+        fn visits_apfs_volume_entries_under_an_external_container() {
+            let root = Value::from_reader_xml(
+                br#"<?xml version="1.0"?><plist version="1.0"><dict>
+                    <key>AllDisksAndPartitions</key><array><dict>
+                        <key>DeviceIdentifier</key><string>disk5</string>
+                        <key>APFSVolumes</key><array><dict>
+                            <key>DeviceIdentifier</key><string>disk5s1</string>
+                            <key>MountPoint</key><string>/Volumes/CAMERA</string>
+                        </dict></array>
+                    </dict></array>
+                </dict></plist>"#,
+            )
+            .expect("fixture plist");
+            let identifiers = disk_entries(&root)
+                .filter_map(|entry| entry.get("DeviceIdentifier"))
+                .filter_map(Value::as_string)
+                .collect::<Vec<_>>();
+            assert_eq!(identifiers, vec!["disk5", "disk5s1"]);
+        }
+
+        #[test]
         fn parses_only_complete_structured_removable_volume_evidence() {
             let value = Value::from_reader_xml(
                 br#"<?xml version="1.0"?><plist version="1.0"><dict>
                     <key>TotalSize</key><integer>1024</integer>
-                    <key>RemovableMediaOrExternal</key><true/>
-                    <key>Internal</key><false/><key>ReadOnlyVolume</key><false/>
+                    <key>RemovableMediaOrExternalDevice</key><true/>
+                    <key>Internal</key><false/><key>WritableVolume</key><true/>
                     <key>VolumeUUID</key><string>F00D</string>
                     <key>FilesystemType</key><string>exfat</string>
                 </dict></plist>"#,
@@ -981,8 +1086,38 @@ mod platform {
             assert_eq!(info.capacity_bytes, Some(1024));
             assert!(info.removable);
             assert!(!info.internal);
-            assert!(!info.read_only);
+            assert!(info.writable);
             assert_eq!(info.filesystem.as_deref(), Some("exfat"));
+
+            value.remove("RemovableMediaOrExternalDevice");
+            value.insert("RemovableMedia".into(), Value::Boolean(true));
+            assert!(
+                disk_info_from_plist(&value)
+                    .expect("component removable key")
+                    .removable
+            );
+
+            value.insert("VirtualOrPhysical".into(), Value::String("Virtual".into()));
+            assert!(
+                !disk_info_from_plist(&value)
+                    .expect("virtual fixture still has complete plist")
+                    .removable
+            );
+
+            value.remove("VirtualOrPhysical");
+            value.insert("WritableVolume".into(), Value::Boolean(false));
+            assert!(
+                !disk_info_from_plist(&value)
+                    .expect("read-only fixture still has complete plist")
+                    .writable
+            );
+
+            value.remove("WritableVolume");
+            assert!(
+                !disk_info_from_plist(&value)
+                    .expect("missing writable evidence still parses")
+                    .writable
+            );
 
             value.remove("TotalSize");
             assert!(disk_info_from_plist(&value).is_none());

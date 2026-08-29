@@ -1,5 +1,24 @@
 # Progress
 
+## 2026-08-29
+
+- Replaced non-standard `HH-mm_offset` interval folders with portable ISO 8601
+  basic timestamp folders such as `20260823T053000+0800`. Day folders carry
+  the same EXIF capture offset at local midnight. A naive EXIF timestamp keeps
+  its recorded camera wall clock and is labelled `-offset-unknown`, rather
+  than being converted through the ingest computer's timezone; absent metadata
+  uses the explicit UTC filesystem-time fallback.
+
+- Moved the ingest-adjacent source snapshot, media inventory scan, and
+  destination preflight into Tauri's blocking worker pool; normal, preview,
+  and recovery ingest already ran their planner/copy/hash work there. Native
+  copy and destination rehash progress is now coalesced to at most 10 IPC
+  messages per second per operation, eliminating the former per-1-MiB React
+  render flood while retaining exact native counters and terminal outcomes.
+  `cargo test --manifest-path src-tauri/Cargo.toml --lib` passed (102 passed;
+  7 hardware tests ignored). Packaged desktop and high-throughput-card UI
+  responsiveness remain unverified.
+
 ## 2026-08-23
 
 - Created the initial memory-bank templates and maintenance rule.
@@ -18,8 +37,8 @@
 - Verified locally: Rust has 25 passing tests including the native ingest/receipt and audited run-transition paths; `cargo clippy -- -D warnings`, TypeScript typecheck, ESLint, Vitest, Vite production build, formatting, and the memory-bank validator pass. Browser QA confirmed desktop and compact layouts, the selected-device destination field, and the preview-only ingest guard with no relevant console warnings/errors.
 - This is still not a complete media-ingest workflow: durable per-file manifests/recovery/checkpoints, metadata extraction and sorting, physical immutable-card identity, hotplug, slot calibration, real format/eject, and macOS/Linux/hardware/performance certification remain incomplete. No receipt or local run state is a format authorization.
 - Added a durable repository/workspace rule requiring generated Git commit messages to use a contextual imperative title plus a descriptive body covering material additions, changes, removals, rationale, and relevant verification or compatibility details.
-- Added a pure-Rust metadata adapter using `nom-exif` 3.6.2 and wired the ingest command's selected sort mode into destination planning. The UI can now select original-tree, camera/day, camera/hour, or camera/minute paths. It uses embedded camera serial when available; metadata without an explicit capture-time offset falls back to filesystem modified UTC with an explicit warning. In-plan camera/day filename collisions receive a deterministic source-path hash suffix instead of overwriting.
-- Locally tested the sort collision path and unsupported-file UTC fallback. Embedded EXIF/RAW/video fixture corpus coverage, configured camera timezones for naive dates, per-file manifest persistence, and OS/device benchmark evidence remain pending.
+- Added a pure-Rust metadata adapter using `nom-exif` 3.6.2 and wired the ingest command's selected sort mode into destination planning. The UI can now select original-tree, camera/day, camera/hour, or camera/minute paths. It uses embedded camera serial when available; metadata with no explicit capture-time offset retains its recorded wall clock and uses an `-offset-unknown` folder label, never a host-local conversion. In-plan camera/day filename collisions receive a deterministic source-path hash suffix instead of overwriting.
+- Locally tested the sort collision path, the unsupported-file UTC fallback, and naive EXIF wall-clock bucketing without a claimed timezone. Embedded EXIF/RAW/video fixture corpus coverage, configured camera-timezone policy, per-file manifest persistence, and OS/device benchmark evidence remain pending.
 - Windows mounted-volume discovery now queries each removable device read-only for storage descriptor reader/vendor/product/serial, physical device number, and SCSI logical unit where provided. The UI receives a derived reader fingerprint, never raw reader serial. Live host inspection confirms the attached SanDisk PRO-READER exposes two logical units, but their SD/microSD meanings are not guessed.
 - Added a persisted, controlled-insertion reader-slot calibration path keyed by exact derived reader fingerprint plus logical unit. The operator can designate the currently known inserted card as SD or microSD; later snapshots project only matching calibrated slots. This is locally unit/UI-tested but not yet hardware-calibrated with cards in both slots.
 - The native ingest completion path now records each independently verified file (source/destination relative paths, byte count, and both BLAKE3 values) in SQLite before allowing `copying -> completed`. A failed persistence write leaves the run non-complete and reports no successful completion. This is a meaningful durable-manifest seam, but it still lacks planned-file snapshots, checkpoint/resume recovery, receipt sealing, and format authorization.
@@ -95,6 +114,34 @@
 - Read-only Windows Storage Management revalidation on 2026-08-25 found no `MSFT_Disk` object for the mounted sacrificial PRO-READER card; the provider can see only its logical volume. This confirms the reader cannot supply a whole-disk opaque target or immutable card identity through this host, so no destructive test was attempted.
 
 For active work, see [Active context](activeContext.md). For evidence requirements, see [Certification matrix](certification-matrix.md).
+
+- 2026-08-29 — Added a macOS-native Disk Arbitration lifecycle bridge. It
+  creates a dedicated Core Foundation run-loop worker, registers appeared,
+  description-changed, and disappeared callbacks, coalesces them into a
+  bounded reconciliation wakeup, and tears down the session before releasing
+  callback state. The watcher registers this bridge before its first snapshot;
+  `diskutil` structured enumeration now operates only as a 30-second missed-
+  event/sleep-wake fallback. The bridge’s Apple-target metadata check, focused
+  discovery tests, frontend checks, and Clippy pass on Windows. A macOS build,
+  callback trace, IOKit parent enrichment, sandbox decision, and reader-backed
+  hardware run remain required before native macOS support is certified.
+
+- 2026-08-29 — Repaired the macOS structured discovery traversal: `diskutil
+list -plist` whole-disk records now recurse into `Partitions` and
+  `APFSVolumes`, allowing a reader-backed SD card's mounted partition to reach
+  the native volume adapter. The adapter now reads the actual
+  `RemovableMediaOrExternalDevice` and `WritableVolume` evidence, rejects
+  virtual/internal/unwritable media, and retains compatibility aliases for
+  older keys. Windows-local Rust tests pass; Apple-native compilation and a
+  real SD-card reader run remain required before macOS support is certified.
+
+- 2026-08-28 — Added persistent verbose support logging for macOS through
+  Tauri's native application log directory. The logger writes redacted
+  lifecycle, inventory, scan, ingest, cancellation, and outcome events with
+  local timestamps; it rotates at 5 MiB while retaining prior files. The
+  support guide names the exact Finder/Terminal location
+  (`~/Library/Logs/com.mediaingest.tool/`). Rust compilation and a real macOS
+  install/collection remain required before this is certified.
 
 - 2026-08-27 — Repaired the live sacrificial M: card's existing exFAT
   filesystem corruption after exact removable-volume verification. Windows
@@ -376,8 +423,58 @@ Tool` product title beside the app icon, removing redundant local-workflow
   short-lived single-use authorization. This bypasses only receipt continuity;
   no destructive hardware run was performed for this new route.
 
+- 2026-08-28 — Simplified custom folders to one input and one destination
+  depth per entry. Legacy saved label/value entries preserve their value but
+  no longer emit the label as an extra directory. Fixture UI and Rust path/copy
+  checks confirm the resulting one-level custom folder behavior.
+
+- 2026-08-28 — Repaired destination-depth tag dragging with a pointer-driven
+  reorder fallback alongside HTML drag/drop. Both test paths and a real browser
+  drag confirmed that Camera model moves after EXIF capture day.
+
 - 2026-08-28 — Built the current `a26b1fb` Windows x64 NSIS installer:
   `Media Ingest Tool_0.1.0_x64-setup.exe` (3,233,407 bytes; SHA-256
   `D8C551B82F2DD66678CE6A23E261AC90E7B15C86BC43201B09649BDF38777792`).
   Authenticode status is `NotSigned`; no installation or release publication
   was performed.
+
+- 2026-08-28 — Repaired the client-side format action gate. A completed run
+  now exposes `Check Quick Format`, which always asks the native backend for a
+  fresh receipt/current-card/provider decision before requesting the opaque
+  confirmation token. Force Reformat is no longer coupled to the unrelated
+  destination-memory UI state; its native hardware-stable registered-card,
+  typed phrase, token, exact-target, remount, and sentinel checks remain
+  mandatory. Vitest, TypeScript, ESLint, and focused formatting checks pass.
+  Browser control did not initialize in this environment, and no destructive
+  media action was performed.
+
+- 2026-08-28 — Added a stale-eligibility regression to the quick-format UI
+  test: the first native check reports blocked, while the operator can still
+  run `Check Quick Format`; its new native response enables the opaque-token
+  confirmation path. Built an unsigned x64 NSIS installer from this exact
+  source at `src-tauri/target/release/bundle/nsis/Media Ingest
+Tool_0.1.0_x64-setup.exe` (3,290,779 bytes; SHA-256
+  `CC65114BD4DC1DD4DE5120CE522B9B3CEDA8A8B2C8719F26A7C91811B559E067`). It
+  was not installed. The installed prior build's D: card was observed without
+  a sealed receipt and with mutable marker-only identity, so keeping format
+  unavailable for that specific live card remains correct.
+
+- 2026-08-28 — Repaired Force Reformat's invisible failure state. Native
+  authorization or execution errors now appear inside the still-open recovery
+  dialog, while its retry/cancel controls remain available. The new UI test
+  verifies the real hardware-stable-identity rejection is visible to the
+  operator. Built an updated unsigned NSIS installer (3,288,856 bytes;
+  SHA-256 `374B902D0EB738D1D994F93DDB92ABAB340DD24FA9F69C131A40C26679A214F2`).
+  The observed Insta360 X5 has not passed its recovery-format prerequisites,
+  and no destructive action was performed.
+
+- 2026-08-28 — Expanded the explicitly confirmed Force Reformat recovery
+  scope: it now bypasses sealed-receipt, marker registration, and identity
+  continuity requirements. It retains exact native removable-target binding,
+  no-active-ingest, typed phrase, short-lived single-use authorization,
+  allowlisted capacity profile, remount validation, and sentinel I/O. A Rust
+  test covers successful post-format validation for an unresolved card at the
+  exact current mount and rejects changed mount/capacity. Built an unsigned
+  NSIS installer (3,289,194 bytes; SHA-256
+  `9F2E08A4D47388D0649EF5F531E09272ECD6B0228A60649783F3F7BF70F3F534`); no
+  destructive hardware operation was run.

@@ -2,7 +2,7 @@
 //!
 //! Unsupported or malformed media never blocks an ingest.  They retain an
 //! explicit filesystem-time fallback and run-scoped unknown camera identity,
-//! rather than inheriting host-local time or another camera's model identity.
+//! rather than inheriting another camera's model identity.
 
 use chrono::{DateTime, FixedOffset, Utc};
 use nom_exif::{read_metadata, ExifDateTime, ExifTag, Metadata, TrackInfoTag};
@@ -11,7 +11,9 @@ use std::path::Path;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CaptureTimeSource {
     ExifOriginalWithOffset,
+    ExifOriginalWithoutOffset,
     ContainerCreateWithOffset,
+    ContainerCreateWithoutOffset,
     FilesystemModifiedUtc,
 }
 
@@ -21,9 +23,12 @@ pub struct MediaMetadata {
     pub model: String,
     pub body_serial: Option<String>,
     pub capture_time: DateTime<FixedOffset>,
+    /// Whether `capture_time` carries a real embedded UTC offset. A false
+    /// value means this is a camera wall clock with no claimed UTC offset.
+    pub capture_offset_known: bool,
     pub capture_time_source: CaptureTimeSource,
     /// A parse failure/missing field is deliberately retained as a warning,
-    /// not promoted into a guessed camera or local timezone.
+    /// not promoted into another camera's identity.
     pub warning: Option<String>,
 }
 
@@ -39,19 +44,25 @@ pub fn inspect(path: &Path) -> MediaMetadata {
         let capture_time = track
             .get(TrackInfoTag::CreateDate)
             .and_then(|value| value.as_datetime())
-            .and_then(|value| match value {
-                ExifDateTime::Aware(value) => Some(value),
-                ExifDateTime::Naive(_) => None,
-            });
+            .map(capture_time_from_exif);
         return capture_time.map_or_else(
             || fallback,
-            |capture_time| MediaMetadata {
+            |(capture_time, capture_offset_known)| MediaMetadata {
                 make: "Unknown make".into(),
                 model: "Unknown model".into(),
                 body_serial: None,
                 capture_time,
-                capture_time_source: CaptureTimeSource::ContainerCreateWithOffset,
-                warning: Some("Container creation time has no embedded camera body serial".into()),
+                capture_offset_known,
+                capture_time_source: if capture_offset_known {
+                    CaptureTimeSource::ContainerCreateWithOffset
+                } else {
+                    CaptureTimeSource::ContainerCreateWithoutOffset
+                },
+                warning: Some(if capture_offset_known {
+                    "Container creation time has no embedded camera body serial".into()
+                } else {
+                    "Container creation time has no UTC offset; using its recorded wall clock and an offset-unknown folder label".into()
+                }),
             },
         );
     };
@@ -74,20 +85,27 @@ pub fn inspect(path: &Path) -> MediaMetadata {
     let capture_time = exif
         .get(ExifTag::DateTimeOriginal)
         .and_then(|value| value.as_datetime())
-        .and_then(|value| match value {
-            ExifDateTime::Aware(value) => Some(value),
-            // The project has no configured camera timezone yet.  Never use
-            // host-local time to give a naive timestamp false precision.
-            ExifDateTime::Naive(_) => None,
-        });
+        .map(capture_time_from_exif);
     match capture_time {
-        Some(capture_time) => MediaMetadata {
+        Some((capture_time, true)) => MediaMetadata {
             make,
             model,
             body_serial,
             capture_time,
+            capture_offset_known: true,
             capture_time_source: CaptureTimeSource::ExifOriginalWithOffset,
             warning: None,
+        },
+        Some((capture_time, false)) => MediaMetadata {
+            make,
+            model,
+            body_serial,
+            capture_time,
+            capture_offset_known: false,
+            capture_time_source: CaptureTimeSource::ExifOriginalWithoutOffset,
+            warning: Some(
+                "DateTimeOriginal has no UTC offset; using its recorded camera wall clock and an offset-unknown folder label".into(),
+            ),
         },
         None => {
             let mut fallback = fallback;
@@ -95,11 +113,21 @@ pub fn inspect(path: &Path) -> MediaMetadata {
             fallback.model = model;
             fallback.body_serial = body_serial;
             fallback.warning = Some(
-                "No timezone-aware DateTimeOriginal metadata; using filesystem modified time in UTC"
-                    .into(),
+                "No readable DateTimeOriginal metadata; using filesystem modified time in UTC".into(),
             );
             fallback
         }
+    }
+}
+
+/// EXIF's `OffsetTimeOriginal` is preferred when present. A naive
+/// `DateTimeOriginal` remains a camera wall clock when it has no embedded
+/// offset. Retain its components, but never convert it through this host or
+/// label it as a known numeric offset.
+fn capture_time_from_exif(value: ExifDateTime) -> (DateTime<FixedOffset>, bool) {
+    match value {
+        ExifDateTime::Aware(value) => (value, true),
+        ExifDateTime::Naive(value) => (value.and_utc().fixed_offset(), false),
     }
 }
 
@@ -114,6 +142,7 @@ fn filesystem_time(path: &Path) -> MediaMetadata {
         model: "Unknown model".into(),
         body_serial: None,
         capture_time,
+        capture_offset_known: true,
         capture_time_source: CaptureTimeSource::FilesystemModifiedUtc,
         warning: Some(
             "No readable embedded media metadata; using filesystem modified time in UTC".into(),
@@ -137,7 +166,20 @@ mod tests {
             metadata.capture_time_source,
             CaptureTimeSource::FilesystemModifiedUtc
         );
+        assert!(metadata.capture_offset_known);
         assert!(metadata.warning.is_some());
         fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn naive_exif_time_preserves_camera_wall_clock_without_a_host_offset() {
+        let naive = chrono::NaiveDate::from_ymd_opt(2026, 8, 23)
+            .expect("date")
+            .and_hms_opt(5, 30, 0)
+            .expect("time");
+        let (capture, had_exif_offset) = capture_time_from_exif(ExifDateTime::Naive(naive));
+        assert!(!had_exif_offset);
+        assert_eq!(capture.naive_local(), naive);
+        assert_eq!(capture.offset().local_minus_utc(), 0);
     }
 }

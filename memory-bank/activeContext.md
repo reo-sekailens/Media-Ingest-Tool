@@ -4,6 +4,44 @@
 
 Implement the remaining TASK004 recovery/durability boundaries alongside conservative TASK002 device identity evidence.
 
+- macOS now starts a native Disk Arbitration run-loop subscription before its
+  first watcher snapshot. Appeared, description-changed, and disappeared
+  callbacks carry only a bounded, coalesced reconciliation wakeup; they never
+  provide a target to the webview. The existing structured `diskutil` mounted-
+  volume projection remains a 30-second fallback while native
+  description/IOKit topology projection and physical Mac evidence are pending.
+
+- Destination time folders now use portable ISO 8601 basic timestamps, for
+  example `20260823T053000+0800`. Their offset comes from the aware EXIF
+  capture timestamp and is never converted to the workstation's timezone.
+  A `DateTimeOriginal` with no offset keeps its recorded camera wall clock for
+  day/interval grouping, but its folder is labelled `-offset-unknown` rather
+  than claiming the ingest computer's timezone. Only absent or invalid
+  timestamps use the explicit UTC filesystem-time fallback.
+
+- Ingest UI responsiveness now has a native boundary: the planner, copy,
+  rehash, source-inventory scan, native source snapshot, and destination
+  preflight run on Tauri blocking workers. Copy/hash byte accounting remains
+  exact, while each ingest emits at most one progress IPC event per 100 ms so
+  fast devices cannot saturate the webview's React render queue. Rust-local
+  unit coverage passes; packaged-app and real high-throughput-card evidence
+  remain required.
+
+- macOS discovery now descends from whole disks into `Partitions` and
+  `APFSVolumes`, where mounted card volumes appear. It accepts the structured
+  `RemovableMediaOrExternalDevice` and `WritableVolume` evidence emitted by
+  `diskutil info -plist`, retains virtual/internal exclusions, and emits no
+  candidate without explicit writable evidence. Windows-local Rust verification
+  passes; an Apple-native compile and reader-backed SD-card run remain required.
+
+- macOS support diagnostics now persist automatically through Tauri's native
+  OS log directory. The Rust boundary records redacted lifecycle, discovery,
+  scan, ingest, cancellation, and terminal-outcome events at debug verbosity;
+  it deliberately excludes source/destination paths, file names, and raw
+  hardware identifiers. Logs rotate at 5 MiB and retain earlier rotations.
+  This is source/local-test evidence only until a Mac package is installed and
+  collected from `~/Library/Logs/com.mediaingest.tool/`.
+
 ## Known facts
 
 - User-selected stack: Tauri with Rust, React, TypeScript, and Tailwind CSS.
@@ -410,6 +448,18 @@ native allowlisted capacity profile, a 60-second single-use token, exact target
 revalidation, remount validation, and sentinel I/O. This route intentionally
 does not write a receipt-bound format record because it has no sealed ingest.
 
+2026-08-28 custom-folder depth correction: each custom entry is now one
+operator-entered destination folder, not a separate label and value pair. Old
+profiles retain their saved value but treat their former label as metadata, so
+they now project a single custom depth as well. Browser fixture, TypeScript,
+and Rust planner/copy verification cover the one-depth layout.
+
+2026-08-28 destination-depth drag repair: folder tags now retain their
+native HTML drag behavior and additionally reorder on pointer drag, which
+avoids browser-specific button drag/drop gaps. Reordering still clears a stale
+preview. Fixture tests cover both input paths and browser automation confirmed
+Camera model moved after EXIF capture day.
+
 2026-08-28 installer build: the current `a26b1fb` main commit produced an
 unsigned Windows x64 NSIS installer at
 `src-tauri/target/release/bundle/nsis/Media Ingest Tool_0.1.0_x64-setup.exe`
@@ -417,3 +467,45 @@ unsigned Windows x64 NSIS installer at
 `D8C551B82F2DD66678CE6A23E261AC90E7B15C86BC43201B09649BDF38777792`).
 Authenticode reports `NotSigned`; it is a local build artifact, not a release
 or clean-machine installation result.
+
+2026-08-28 format-control recovery: a completed ingest now always exposes a
+`Check Quick Format` action rather than relying on a potentially stale
+webview eligibility value. Clicking it obtains a fresh native eligibility
+decision before it can request an opaque authorization. Force Reformat is no
+longer client-blocked by destination-memory availability; the native command
+still enforces the current hardware-stable registered-card, typed phrase,
+single-use token, exact target, and provider checks. Fixture UI coverage
+passes; this change does not perform or certify a destructive format.
+
+2026-08-28 format-control package: the fixture regression starts with a
+blocked eligibility response, then proves the `Check Quick Format` action
+rechecks native eligibility and reaches the opaque confirmation. The local
+Windows NSIS package built from that source is
+`src-tauri/target/release/bundle/nsis/Media Ingest Tool_0.1.0_x64-setup.exe`
+(3,290,779 bytes; SHA-256
+`CC65114BD4DC1DD4DE5120CE522B9B3CEDA8A8B2C8719F26A7C91811B559E067`). It is
+unsigned and has not been installed. The currently installed older build was
+observed with D: selected; it correctly had no sealed receipt and mutable
+marker-only evidence, so no format action could safely be enabled for that
+card.
+
+2026-08-28 force-reformat result visibility: rejected recovery-format requests
+now render their native error inside the open confirmation modal, rather than
+only behind its backdrop. The modal remains open and retryable. The current
+Insta360 X5 card shown before any ingest is not a recovery-format candidate:
+Force Reformat does not waive current hardware-stable identity or registered
+managed-card checks, and the modal now tells the operator which check failed.
+The updated unsigned NSIS package is 3,288,856 bytes with SHA-256
+`374B902D0EB738D1D994F93DDB92ABAB340DD24FA9F69C131A40C26679A214F2`.
+
+2026-08-28 force-reformat scope: operator-directed recovery formatting now
+bypasses the sealed receipt, managed marker/profile registration, and identity
+continuity gates. It still requires the exact phrase, a uniquely present
+native-discovered removable mount, no active ingest, an allowlisted
+capacity-derived profile, a 60-second single-use token, provider-owned exact
+target resolution, remount validation, and sentinel I/O. Post-format recovery
+uses the provider's resolved target plus mount/capacity validation rather than
+the pre-format card identity. The updated unsigned NSIS package is 3,289,194
+bytes with SHA-256
+`9F2E08A4D47388D0649EF5F531E09272ECD6B0228A60649783F3F7BF70F3F534`; no live
+format was run.

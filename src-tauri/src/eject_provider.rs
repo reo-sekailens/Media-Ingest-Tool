@@ -307,20 +307,45 @@ mod platform {
     const DISKUTIL: &str = "/usr/sbin/diskutil";
 
     pub(super) fn safe_eject(mount_root: &Path) -> Result<(), SafeEjectError> {
-        let canonical = mount_root
-            .canonicalize()
-            .map_err(|_| SafeEjectError::EjectFailed)?;
+        let canonical = mount_root.canonicalize().map_err(|error| {
+            log::debug!(
+                target: "media_ingest::macos::eject",
+                "safe-eject mount could not be canonicalized (error kind: {:?})",
+                error.kind()
+            );
+            SafeEjectError::EjectFailed
+        })?;
         if !canonical.is_dir() || !canonical.starts_with("/Volumes/") {
+            log::warn!(
+                target: "media_ingest::macos::eject",
+                "safe-eject rejected a mount outside the macOS removable-volume root"
+            );
             return Err(SafeEjectError::DeviceNotEjectable);
         }
         let output = Command::new(DISKUTIL)
             .args(["eject", "-plist"])
             .arg(&canonical)
             .output()
-            .map_err(|_| SafeEjectError::EjectFailed)?;
+            .map_err(|error| {
+                log::warn!(
+                    target: "media_ingest::macos::eject",
+                    "diskutil eject invocation failed (error kind: {:?})",
+                    error.kind()
+                );
+                SafeEjectError::EjectFailed
+            })?;
         if output.status.success() {
+            log::info!(
+                target: "media_ingest::macos::eject",
+                "diskutil reported safe eject success"
+            );
             Ok(())
         } else {
+            log::warn!(
+                target: "media_ingest::macos::eject",
+                "diskutil eject returned an unsuccessful status (exit code: {:?})",
+                output.status.code()
+            );
             Err(SafeEjectError::DeviceBusy(None))
         }
     }

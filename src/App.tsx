@@ -393,7 +393,7 @@ function destinationDepthSegmentLabel(
 ): string {
   if (segment.kind === "custom_field") {
     const field = customDirectoryFields[segment.index];
-    return field?.label.trim() || `Custom field ${segment.index + 1}`;
+    return field?.value.trim() || `Custom folder ${segment.index + 1}`;
   }
   if (segment.kind === "camera_model") return "Camera model";
   if (segment.kind === "capture_day") return "EXIF capture day";
@@ -406,7 +406,7 @@ function destinationDepthSegmentLabel(
 function customDirectoryFieldsAreComplete(
   fields: readonly CustomDirectoryField[],
 ): boolean {
-  return fields.every((field) => field.label.trim() && field.value.trim());
+  return fields.every((field) => field.value.trim());
 }
 
 function StatusDot({ tone }: { tone: "ready" | "copying" | "verified" }) {
@@ -443,6 +443,7 @@ function App() {
   const [draggedDepthSegmentKey, setDraggedDepthSegmentKey] = useState<string | null>(
     null,
   );
+  const draggedDepthSegmentKeyRef = useRef<string | null>(null);
   const [calibrationKind, setCalibrationKind] = useState<"sd" | "micro_sd">("sd");
   const [calibrationLabel, setCalibrationLabel] = useState("");
   const [history, setHistory] = useState<readonly IngestHistoryEntry[]>([]);
@@ -481,6 +482,7 @@ function App() {
   const [pendingForceReformat, setPendingForceReformat] =
     useState<PendingForceReformat | null>(null);
   const [forceReformatPhrase, setForceReformatPhrase] = useState("");
+  const [forceReformatError, setForceReformatError] = useState("");
   const [isExecutingFormat, setIsExecutingFormat] = useState(false);
   const [completedRuns, setCompletedRuns] = useState<
     Readonly<Record<string, CompletedRun>>
@@ -527,8 +529,8 @@ function App() {
       ];
     }
     const field = customDirectoryFields[segment.index];
-    return field?.label.trim() && field.value.trim()
-      ? [field.label.trim(), field.value.trim()]
+    return field?.value.trim()
+      ? [field.value.trim()]
       : [
           destinationDepthSegmentLabel(
             segment,
@@ -537,6 +539,37 @@ function App() {
           ),
         ];
   });
+  const moveDestinationDepthSegment = useCallback(
+    (dragged: string, target: string) => {
+      if (!dragged || dragged === target) return;
+      setDestinationDepthOrder((current) => {
+        const order = normalizeDestinationDepthOrder(
+          current,
+          availableDestinationDepthOrder,
+        );
+        const from = order.findIndex(
+          (item) => destinationDepthSegmentKey(item) === dragged,
+        );
+        const to = order.findIndex(
+          (item) => destinationDepthSegmentKey(item) === target,
+        );
+        if (from < 0 || to < 0) return order;
+        const next = [...order];
+        const [moved] = next.splice(from, 1);
+        next.splice(to, 0, moved);
+        return next;
+      });
+      if (selected) {
+        setPlanPreviews((current) => {
+          const remaining = { ...current };
+          delete remaining[selected.id];
+          return remaining;
+        });
+        setPlanPreviewLabels((current) => ({ ...current, [selected.id]: "" }));
+      }
+    },
+    [availableDestinationDepthOrder, selected],
+  );
   const selectedInventory = selected ? sourceInventories[selected.id] : undefined;
   const selectedInventoryLabel = selected ? sourceInventoryLabels[selected.id] : "";
   const selectedPlanPreview = selected ? planPreviews[selected.id] : undefined;
@@ -1135,7 +1168,7 @@ function App() {
     [],
   );
   const requestFormatAuthorization = useCallback(async () => {
-    if (!selected || !selectedCompletedRun || !selectedFormatEligibility?.eligible) {
+    if (!selected || !selectedCompletedRun) {
       return;
     }
     if (!isTauri()) {
@@ -1147,9 +1180,47 @@ function App() {
     }
     setFormatReadinessLabels((current) => ({
       ...current,
-      [selected.id]: "Preparing a one-time quick-format confirmation…",
+      [selected.id]: "Checking the current quick-format safety gate…",
     }));
     try {
+      const eligibility = await invoke<{
+        data: FormatEligibility | null;
+        error: { message: string } | null;
+      }>("get_format_eligibility", {
+        request: {
+          runId: selectedCompletedRun.runId,
+          sourceMediumKey: selected.id,
+          sourceGeneration: selectedCompletedRun.sourceGeneration,
+          sourceIdentityConfidence: selectedCompletedRun.sourceIdentityConfidence,
+        },
+      });
+      if (!eligibility.data?.eligible) {
+        setFormatEligibility((current) => ({
+          ...current,
+          [selected.id]: eligibility.data ?? {
+            eligible: false,
+            reason:
+              eligibility.error?.message ?? "Format readiness could not be checked.",
+            recommendedProfile: null,
+          },
+        }));
+        setFormatReadinessLabels((current) => ({
+          ...current,
+          [selected.id]:
+            eligibility.data?.reason ??
+            eligibility.error?.message ??
+            "Format readiness could not be checked.",
+        }));
+        return;
+      }
+      setFormatEligibility((current) => ({
+        ...current,
+        [selected.id]: eligibility.data!,
+      }));
+      setFormatReadinessLabels((current) => ({
+        ...current,
+        [selected.id]: "Preparing a one-time quick-format confirmation…",
+      }));
       const response = await invoke<{
         data: FormatAuthorization | null;
         error: { message: string } | null;
@@ -1176,7 +1247,7 @@ function App() {
         media: selected.media,
         capacity: selected.capacity,
         receiptId: selectedCompletedRun.runId,
-        profile: selectedFormatEligibility.recommendedProfile,
+        profile: eligibility.data.recommendedProfile,
       });
       setFormatReadinessLabels((current) => ({ ...current, [selected.id]: "" }));
     } catch {
@@ -1185,7 +1256,7 @@ function App() {
         [selected.id]: "The desktop service could not prepare quick format.",
       }));
     }
-  }, [selected, selectedCompletedRun, selectedFormatEligibility]);
+  }, [selected, selectedCompletedRun]);
   const executeFormatAuthorization = useCallback(async () => {
     const confirmation = pendingFormatConfirmation;
     if (!confirmation || isExecutingFormat) return;
@@ -1239,11 +1310,13 @@ function App() {
         },
       });
       if (!authorization.data) {
+        const message =
+          authorization.error?.message ?? "Force reformat was not authorized.";
         setFormatReadinessLabels((current) => ({
           ...current,
-          [selected.id]:
-            authorization.error?.message ?? "Force reformat was not authorized.",
+          [selected.id]: message,
         }));
+        setForceReformatError(message);
         return;
       }
       const response = await invoke<{
@@ -1252,25 +1325,31 @@ function App() {
       }>("execute_format_authorization", {
         request: { confirmationToken: authorization.data.confirmationToken },
       });
+      const message = response.data
+        ? `Force reformat completed: ${response.data.profileId}; formatted and writable${response.data.markerRestored ? "; card registration restored" : ""}.`
+        : (response.error?.message ?? "Force reformat did not complete.");
       setFormatReadinessLabels((current) => ({
         ...current,
-        [selected.id]: response.data
-          ? `Force reformat completed: ${response.data.profileId}; formatted and writable${response.data.markerRestored ? "; card registration restored" : ""}.`
-          : (response.error?.message ?? "Force reformat did not complete."),
+        [selected.id]: message,
       }));
+      if (!response.data) {
+        setForceReformatError(message);
+      }
       if (response.data) {
         setPendingForceReformat(null);
         setForceReformatPhrase("");
         await Promise.all([refreshDevices(), refreshHistory()]);
       }
     } catch (error) {
+      const message =
+        error instanceof Error
+          ? `The desktop service could not complete force reformat: ${error.message}`
+          : "The desktop service could not complete force reformat.";
       setFormatReadinessLabels((current) => ({
         ...current,
-        [selected.id]:
-          error instanceof Error
-            ? `The desktop service could not complete force reformat: ${error.message}`
-            : "The desktop service could not complete force reformat.",
+        [selected.id]: message,
       }));
+      setForceReformatError(message);
     } finally {
       setIsExecutingFormat(false);
     }
@@ -1309,12 +1388,8 @@ function App() {
 
   useEffect(() => {
     if (!isTauri()) return;
-    const timer = window.setTimeout(() => {
-      void refreshDevices();
-      void refreshHistory();
-    }, 0);
     if (storageWatchStarted.current) {
-      return () => window.clearTimeout(timer);
+      return;
     }
     storageWatchStarted.current = true;
     const updates = new Channel<NativeDeviceSnapshot>();
@@ -1327,8 +1402,13 @@ function App() {
       })
       .catch(() => {
         setScanLabel("Native storage change monitoring could not start.");
+      })
+      .finally(() => {
+        // Native subscriptions are registered before this first explicit
+        // snapshot, so a card inserted during startup cannot race the watcher.
+        void refreshDevices();
+        void refreshHistory();
       });
-    return () => window.clearTimeout(timer);
   }, [applyNativeSnapshot, refreshDevices, refreshHistory]);
   useEffect(() => {
     if (!isTauri()) return;
@@ -2081,22 +2161,17 @@ function App() {
               <button
                 className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/25 dark:bg-rose-500/10 dark:text-rose-300"
                 type="button"
-                disabled={
-                  !selectedFormatEligibility?.eligible ||
-                  !selectedCompletedRun ||
-                  isCopying
-                }
+                disabled={!selectedCompletedRun || isCopying}
                 onClick={() => void requestFormatAuthorization()}
                 title={
                   selectedFormatEligibility?.eligible
                     ? "Opens a one-time confirmation for this verified card."
-                    : selectedFormatReadinessLabel ||
-                      "Formatting requires a sealed receipt, immutable medium identity, and a native format provider."
+                    : "Rechecks the sealed receipt, current card, and native format provider before opening confirmation."
                 }
               >
                 {selectedFormatEligibility?.eligible
                   ? "Quick Format"
-                  : "Format Unavailable"}
+                  : "Check Quick Format"}
               </button>
               <span className="max-w-xs text-xs leading-5 text-slate-500 md:text-right dark:text-slate-400">
                 {selectedFormatReadinessLabel ||
@@ -2106,25 +2181,26 @@ function App() {
               </span>
               <button
                 className="rounded-lg border border-rose-300 bg-white px-3 py-2 text-xs font-semibold text-rose-800 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/40 dark:bg-slate-900 dark:text-rose-200"
-                disabled={!selected || isCopying || !canRememberDestination}
-                onClick={() =>
-                  selected &&
+                disabled={!selected || isCopying}
+                onClick={() => {
+                  if (!selected) return;
                   setPendingForceReformat({
                     deviceId: selected.id,
                     deviceName: selected.name,
                     media: selected.media,
                     capacity: selected.capacity,
-                  })
-                }
-                title="Recovery option for a registered card when its sealed-receipt witness is no longer current."
+                  });
+                  setForceReformatPhrase("");
+                  setForceReformatError("");
+                }}
+                title="Destructive recovery action. It bypasses receipt, registration, and identity continuity, but still revalidates the removable target."
                 type="button"
               >
                 Force Reformat
               </button>
               <span className="max-w-xs text-xs leading-5 text-slate-500 md:text-right dark:text-slate-400">
-                Bypasses the sealed-receipt witness only after typing an explicit
-                confirmation; card identity, registration, and native checks still
-                apply.
+                Bypasses receipt, registration, and identity continuity only after
+                explicit confirmation; native removable-target checks still apply.
               </span>
             </div>
           </div>
@@ -2315,7 +2391,8 @@ function App() {
                         Custom folders
                       </strong>
                       <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                        Add details such as Photographer / Ari before the camera model.
+                        Each entry makes one folder depth, for example Photographer —
+                        Ari.
                       </p>
                     </div>
                     <button
@@ -2324,7 +2401,7 @@ function App() {
                       onClick={() =>
                         setCustomDirectoryFields((current) => [
                           ...current,
-                          { label: "Photographer", value: "" },
+                          { label: "", value: "" },
                         ])
                       }
                       type="button"
@@ -2337,23 +2414,8 @@ function App() {
                       {customDirectoryFields.map((field, index) => (
                         <div
                           className="flex flex-wrap items-center gap-2"
-                          key={`${index}-${field.label}`}
+                          key={`${index}-${field.value}`}
                         >
-                          <input
-                            aria-label={`Custom folder ${index + 1} label`}
-                            className="min-w-28 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
-                            onChange={(event) =>
-                              setCustomDirectoryFields((current) =>
-                                current.map((item, itemIndex) =>
-                                  itemIndex === index
-                                    ? { ...item, label: event.target.value }
-                                    : item,
-                                ),
-                              )
-                            }
-                            placeholder="Field name"
-                            value={field.label}
-                          />
                           <input
                             aria-label={`Custom folder ${index + 1} value`}
                             className="min-w-28 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
@@ -2366,7 +2428,7 @@ function App() {
                                 ),
                               )
                             }
-                            placeholder="Value"
+                            placeholder="Folder name, e.g. Photographer — Ari"
                             value={field.value}
                           />
                           <button
@@ -2405,10 +2467,13 @@ function App() {
                         segment.kind === "custom_field"
                           ? customDirectoryFields[segment.index]
                           : undefined;
-                      const customFieldIndex =
-                        segment.kind === "custom_field" ? segment.index : 0;
                       const label = field
-                        ? `${field.label || `Custom field ${customFieldIndex + 1}`} / ${field.value || "value"}`
+                        ? field.value ||
+                          destinationDepthSegmentLabel(
+                            segment,
+                            customDirectoryFields,
+                            selectedSortRequest,
+                          )
                         : destinationDepthSegmentLabel(
                             segment,
                             customDirectoryFields,
@@ -2424,48 +2489,40 @@ function App() {
                                 : "border-slate-200 dark:border-slate-700"
                             }`}
                             draggable
-                            onDragEnd={() => setDraggedDepthSegmentKey(null)}
+                            onDragEnd={() => {
+                              draggedDepthSegmentKeyRef.current = null;
+                              setDraggedDepthSegmentKey(null);
+                            }}
                             onDragOver={(event) => event.preventDefault()}
                             onDragStart={(event) => {
                               event.dataTransfer.effectAllowed = "move";
                               event.dataTransfer.setData("text/plain", key);
+                              draggedDepthSegmentKeyRef.current = key;
                               setDraggedDepthSegmentKey(key);
                             }}
                             onDrop={(event) => {
                               event.preventDefault();
                               const dragged =
                                 event.dataTransfer.getData("text/plain") ||
-                                draggedDepthSegmentKey;
-                              if (!dragged || dragged === key) return;
-                              setDestinationDepthOrder((current) => {
-                                const order = normalizeDestinationDepthOrder(
-                                  current,
-                                  availableDestinationDepthOrder,
-                                );
-                                const from = order.findIndex(
-                                  (item) =>
-                                    destinationDepthSegmentKey(item) === dragged,
-                                );
-                                const to = order.findIndex(
-                                  (item) => destinationDepthSegmentKey(item) === key,
-                                );
-                                if (from < 0 || to < 0) return order;
-                                const next = [...order];
-                                const [moved] = next.splice(from, 1);
-                                next.splice(to, 0, moved);
-                                return next;
-                              });
-                              if (selected) {
-                                setPlanPreviews((current) => {
-                                  const { [selected.id]: _discarded, ...remaining } =
-                                    current;
-                                  return remaining;
-                                });
-                                setPlanPreviewLabels((current) => ({
-                                  ...current,
-                                  [selected.id]: "",
-                                }));
-                              }
+                                draggedDepthSegmentKeyRef.current;
+                              if (dragged) moveDestinationDepthSegment(dragged, key);
+                              draggedDepthSegmentKeyRef.current = null;
+                              setDraggedDepthSegmentKey(null);
+                            }}
+                            onPointerCancel={() => {
+                              draggedDepthSegmentKeyRef.current = null;
+                              setDraggedDepthSegmentKey(null);
+                            }}
+                            onPointerDown={() => {
+                              draggedDepthSegmentKeyRef.current = key;
+                              setDraggedDepthSegmentKey(key);
+                            }}
+                            onPointerEnter={() => {
+                              const dragged = draggedDepthSegmentKeyRef.current;
+                              if (dragged) moveDestinationDepthSegment(dragged, key);
+                            }}
+                            onPointerUp={() => {
+                              draggedDepthSegmentKeyRef.current = null;
                               setDraggedDepthSegmentKey(null);
                             }}
                             type="button"
@@ -2900,9 +2957,9 @@ function App() {
               Force Reformat This Registered Card?
             </h2>
             <p className="mt-3 text-sm leading-6 text-slate-600 dark:text-slate-300">
-              Use this only when the normal verified-card format path is blocked by a
-              stale receipt witness. It bypasses that receipt check and removes all
-              filesystem structures; it is not secure erasure.
+              This bypasses receipt, registration, and identity continuity checks and
+              removes all filesystem structures. It still requires an exact current
+              removable target and post-format validation; it is not secure erasure.
             </p>
             <dl className="mt-5 grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs dark:border-slate-700 dark:bg-slate-950/40">
               <div className="grid gap-1 sm:grid-cols-[8rem_1fr] sm:gap-3">
@@ -2927,6 +2984,14 @@ function App() {
                 onChange={(event) => setForceReformatPhrase(event.target.value)}
               />
             </label>
+            {forceReformatError ? (
+              <p
+                className="mt-3 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-800 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200"
+                role="alert"
+              >
+                {forceReformatError}
+              </p>
+            ) : null}
             <div className="mt-6 flex flex-wrap justify-end gap-3">
               <button
                 className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:text-slate-300 dark:hover:bg-slate-800"
@@ -2934,6 +2999,7 @@ function App() {
                 onClick={() => {
                   setPendingForceReformat(null);
                   setForceReformatPhrase("");
+                  setForceReformatError("");
                 }}
                 type="button"
               >

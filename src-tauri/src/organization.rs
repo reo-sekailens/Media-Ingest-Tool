@@ -23,9 +23,9 @@ pub struct CameraIdentity {
     pub confidence: CameraConfidence,
 }
 
-/// An operator-selected field which contributes one deterministic directory
-/// level before the camera/time layout. For example, `Photographer` + `Ari`
-/// becomes `Photographer/Ari`.
+/// An operator-selected folder which contributes exactly one deterministic
+/// directory level before the camera/time layout. `label` is retained only to
+/// deserialize older profiles; it never creates a directory level.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct CustomDirectoryField {
     label: String,
@@ -36,7 +36,9 @@ impl CustomDirectoryField {
     pub fn new(label: impl Into<String>, value: impl Into<String>) -> Result<Self, &'static str> {
         let label = label.into();
         let value = value.into();
-        validate_custom_directory_component(&label, "custom field label")?;
+        if !label.trim().is_empty() {
+            validate_custom_directory_component(&label, "custom field label")?;
+        }
         validate_custom_directory_component(&value, "custom field value")?;
         Ok(Self { label, value })
     }
@@ -100,10 +102,8 @@ pub fn custom_directory_prefix(fields: &[CustomDirectoryField]) -> Result<PathBu
     for field in fields {
         // The type's constructor validates these, but revalidate here to keep
         // this boundary safe if construction changes in a future persistence
-        // adapter.
-        validate_custom_directory_component(field.label(), "custom field label")?;
+        // adapter. Legacy labels are presentation metadata, not folders.
         validate_custom_directory_component(field.value(), "custom field value")?;
-        prefix.push(sanitize_destination_component(field.label()));
         prefix.push(sanitize_destination_component(field.value()));
     }
     Ok(prefix)
@@ -190,6 +190,28 @@ pub fn destination_relative_path_with_order(
     custom_fields: &[CustomDirectoryField],
     requested_order: Option<&[DestinationDepthSegment]>,
 ) -> Result<PathBuf, &'static str> {
+    destination_relative_path_with_order_and_offset(
+        original_relative_path,
+        camera,
+        capture,
+        true,
+        mode,
+        custom_fields,
+        requested_order,
+    )
+}
+
+/// Projects a capture timestamp into a portable destination path. An unknown
+/// EXIF offset stays explicit rather than becoming a host-local timezone.
+pub fn destination_relative_path_with_order_and_offset(
+    original_relative_path: &str,
+    camera: &CameraIdentity,
+    capture: DateTime<FixedOffset>,
+    capture_offset_known: bool,
+    mode: SortMode,
+    custom_fields: &[CustomDirectoryField],
+    requested_order: Option<&[DestinationDepthSegment]>,
+) -> Result<PathBuf, &'static str> {
     let original = portable_relative_path(original_relative_path)?;
     let filename = original.file_name().ok_or("missing filename")?.to_owned();
     let order = canonical_destination_depth_order(&mode, custom_fields.len(), requested_order)?;
@@ -204,12 +226,14 @@ pub fn destination_relative_path_with_order(
                 let field = custom_fields
                     .get(usize::from(index))
                     .ok_or("destination depth order references an unknown custom field")?;
-                destination.push(sanitize_destination_component(field.label()));
                 destination.push(sanitize_destination_component(field.value()));
             }
             DestinationDepthSegment::CameraModel => destination.push(camera_folder(camera)),
             DestinationDepthSegment::CaptureDay => {
-                destination.push(capture.format("%Y-%m-%d").to_string())
+                // ISO 8601 basic form is portable on Windows, unlike the
+                // extended form's colon characters. Preserve the capture's
+                // fixed offset instead of converting it to host-local time.
+                destination.push(capture_day_folder(capture, capture_offset_known))
             }
             DestinationDepthSegment::CaptureInterval => {
                 let minutes = match mode {
@@ -218,7 +242,11 @@ pub fn destination_relative_path_with_order(
                         return Err("destination depth segment is not supported by this sort mode")
                     }
                 };
-                destination.push(capture_interval_folder(capture, minutes)?);
+                destination.push(capture_interval_folder(
+                    capture,
+                    capture_offset_known,
+                    minutes,
+                )?);
             }
             DestinationDepthSegment::OriginalTree => {
                 if let Some(parent) = original.parent() {
@@ -246,6 +274,7 @@ fn camera_folder(camera: &CameraIdentity) -> String {
 
 fn capture_interval_folder(
     capture: DateTime<FixedOffset>,
+    capture_offset_known: bool,
     minutes: u16,
 ) -> Result<String, &'static str> {
     validate_interval_minutes(minutes)?;
@@ -254,8 +283,29 @@ fn capture_interval_folder(
     // its final bucket simply ends at the next local midnight.
     let minute = capture.hour() as u16 * 60 + capture.minute() as u16;
     let bucket = minute / minutes * minutes;
-    let offset = capture.format("%:z").to_string().replace(':', "");
-    Ok(format!("{:02}-{:02}_{offset}", bucket / 60, bucket % 60))
+    Ok(format!(
+        "{}T{:02}{:02}00{}",
+        capture.format("%Y%m%d"),
+        bucket / 60,
+        bucket % 60,
+        capture_offset_label(capture, capture_offset_known)
+    ))
+}
+
+fn capture_day_folder(capture: DateTime<FixedOffset>, capture_offset_known: bool) -> String {
+    format!(
+        "{}T000000{}",
+        capture.format("%Y%m%d"),
+        capture_offset_label(capture, capture_offset_known)
+    )
+}
+
+fn capture_offset_label(capture: DateTime<FixedOffset>, capture_offset_known: bool) -> String {
+    if capture_offset_known {
+        capture.format("%z").to_string()
+    } else {
+        "-offset-unknown".into()
+    }
 }
 
 fn validate_interval_minutes(minutes: u16) -> Result<(), &'static str> {
@@ -462,13 +512,7 @@ mod tests {
             CustomDirectoryField::new("Project", "Night Market").expect("project"),
         ];
         let prefix = custom_directory_prefix(&fields).expect("prefix");
-        assert_eq!(
-            prefix,
-            PathBuf::from("Photographer")
-                .join("Ari Tan")
-                .join("Project")
-                .join("Night Market")
-        );
+        assert_eq!(prefix, PathBuf::from("Ari Tan").join("Night Market"));
         assert!(is_portable_destination_relative_path(&prefix));
     }
 
@@ -479,7 +523,7 @@ mod tests {
             Err("custom field value cannot be empty")
         );
         assert_eq!(
-            CustomDirectoryField::new("Photographer/role", "Ari"),
+            CustomDirectoryField::new("", "Photographer/role"),
             Err("custom directory fields cannot contain path separators or reserved characters")
         );
         assert_eq!(
@@ -591,17 +635,17 @@ mod tests {
         );
         assert_eq!(
             path.components().count(),
-            5,
-            "day, custom label/value, camera, filename"
+            4,
+            "day, one custom folder, camera, filename"
         );
         assert!(path
             .to_string_lossy()
-            .starts_with("2026-08-28\\Photographer\\Ari\\FX3__"));
+            .starts_with("20260828T000000+0000\\Ari\\FX3__"));
         assert!(is_portable_destination_relative_path(&path));
     }
 
     #[test]
-    fn interval_bucket_includes_offset_for_ambiguous_local_hours() {
+    fn interval_bucket_is_iso_8601_basic_and_includes_the_capture_offset() {
         let capture = Utc
             .with_ymd_and_hms(2026, 11, 1, 9, 47, 0)
             .unwrap()
@@ -614,7 +658,7 @@ mod tests {
             SortMode::CameraInterval { minutes: 60 },
         )
         .expect("path");
-        assert!(path.to_string_lossy().contains("01-00_-0800"));
+        assert!(path.to_string_lossy().contains("20261101T010000-0800"));
     }
 
     #[test]
@@ -631,7 +675,42 @@ mod tests {
             SortMode::CameraInterval { minutes: 37 },
         )
         .expect("path");
-        assert!(path.to_string_lossy().contains("2026-08-23\\23-26_+0000"));
+        assert!(path.to_string_lossy().contains("20260823T232600+0000"));
+    }
+
+    #[test]
+    fn capture_day_uses_an_iso_timestamp_with_the_exif_offset() {
+        let camera = camera_identity("Sony", "FX3", Some("A-001"), "run");
+        let capture = Utc
+            .with_ymd_and_hms(2026, 8, 23, 5, 30, 0)
+            .unwrap()
+            .with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap());
+        let path =
+            destination_relative_path("PRIVATE/CLIP.MOV", &camera, capture, SortMode::CameraDay)
+                .expect("path");
+        assert!(path.to_string_lossy().contains("20260823T000000+0800"));
+    }
+
+    #[test]
+    fn interval_bucket_preserves_naive_camera_wall_clock_without_claiming_utc() {
+        let camera = camera_identity("Canon", "EOS 80D", Some("body"), "run");
+        let capture = Utc
+            .with_ymd_and_hms(2026, 2, 12, 13, 13, 57)
+            .unwrap()
+            .with_timezone(&FixedOffset::east_opt(0).unwrap());
+        let path = destination_relative_path_with_order_and_offset(
+            "DCIM/IMG_0858.JPG",
+            &camera,
+            capture,
+            false,
+            SortMode::CameraInterval { minutes: 30 },
+            &[],
+            None,
+        )
+        .expect("path");
+        assert!(path
+            .to_string_lossy()
+            .contains("20260212T130000-offset-unknown"));
     }
 
     #[test]

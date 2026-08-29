@@ -69,7 +69,7 @@ test("switches the selected storage fixture", () => {
   expect(
     screen.getByPlaceholderText("E:\\Ingest\\Documentary\\Day 03"),
   ).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: /format unavailable/i })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /check quick format/i })).toBeDisabled();
   expect(screen.getByText(/native format provider not installed/i)).toBeInTheDocument();
   expect(
     screen.getByText(/insertion 1.*changes after this medium is absent/i),
@@ -142,18 +142,18 @@ test("selects EXIF sort tags and shows the resulting destination depth", () => {
   ).toBeInTheDocument();
 });
 
-test("adds a custom folder before the camera model", () => {
+test("adds one custom folder depth before the camera model", () => {
   render(<App />);
 
   fireEvent.click(screen.getByRole("button", { name: "Add field" }));
   fireEvent.change(screen.getByLabelText("Custom folder 1 value"), {
-    target: { value: "Ari" },
+    target: { value: "Photographer — Ari" },
   });
 
   expect(
-    screen.getByRole("status", { name: "Destination depth 4 levels" }),
+    screen.getByRole("status", { name: "Destination depth 3 levels" }),
   ).toBeInTheDocument();
-  expect(screen.getByText("Photographer / Ari")).toBeInTheDocument();
+  expect(screen.getByText("Photographer — Ari")).toBeInTheDocument();
   expect(screen.getByText("Camera model")).toBeInTheDocument();
 });
 
@@ -173,6 +173,26 @@ test("reorders destination depth with draggable folder tags", () => {
 
   fireEvent.dragStart(camera, { dataTransfer });
   fireEvent.drop(day, { dataTransfer });
+
+  expect(
+    screen
+      .getAllByRole("button", { name: /move .* in destination order/i })
+      .map((button) => button.textContent),
+  ).toEqual(["EXIF capture day", "Camera model"]);
+});
+
+test("reorders destination depth with a pointer drag", () => {
+  render(<App />);
+  const camera = screen.getByRole("button", {
+    name: "Move Camera model in destination order",
+  });
+  const day = screen.getByRole("button", {
+    name: "Move EXIF capture day in destination order",
+  });
+
+  fireEvent.pointerDown(camera, { pointerId: 1, pointerType: "mouse" });
+  fireEvent.pointerEnter(day, { pointerId: 1, pointerType: "mouse" });
+  fireEvent.pointerUp(day, { pointerId: 1, pointerType: "mouse" });
 
   expect(
     screen
@@ -218,6 +238,7 @@ test("keeps typed destination entry as a browser-preview fallback", () => {
 
 test("confirms an eligible quick format with an opaque native token", async () => {
   Object.assign(window, { __TAURI_INTERNALS__: {} });
+  let formatEligibilityChecks = 0;
   const snapshot = {
     sequence: 1,
     devices: [
@@ -272,21 +293,36 @@ test("confirms an eligible quick format with an opaque native token", async () =
       });
     }
     if (command === "get_format_eligibility") {
+      formatEligibilityChecks += 1;
       return Promise.resolve({
         data: {
-          eligible: true,
-          reason: "Eligible for the allowlisted generic profile.",
-          recommendedProfile: {
-            id: "sdxc-default",
-            filesystem: "exfat",
-            inferredFromCapacity: true,
-          },
+          eligible: formatEligibilityChecks > 1,
+          reason:
+            formatEligibilityChecks > 1
+              ? "Eligible for the allowlisted generic profile."
+              : "A stale webview eligibility result must not block a fresh check.",
+          recommendedProfile:
+            formatEligibilityChecks > 1
+              ? {
+                  id: "sdxc-default",
+                  filesystem: "exfat",
+                  inferredFromCapacity: true,
+                }
+              : null,
         },
       });
     }
     if (command === "request_format_authorization") {
       return Promise.resolve({
         data: { confirmationToken: "opaque-format-token", expiresInSeconds: 60 },
+      });
+    }
+    if (command === "request_force_format_authorization") {
+      return Promise.resolve({
+        data: null,
+        error: {
+          message: "Force reformat needs a hardware-stable current card identity",
+        },
       });
     }
     if (command === "execute_format_authorization") {
@@ -303,7 +339,9 @@ test("confirms an eligible quick format with an opaque native token", async () =
     target: { value: "D:\\Ingest\\Format" },
   });
   fireEvent.click(screen.getByRole("button", { name: /start verified ingest/i }));
-  const quickFormat = await screen.findByRole("button", { name: /^quick format$/i });
+  const quickFormat = await screen.findByRole("button", {
+    name: /^check quick format$/i,
+  });
   await waitFor(() => expect(quickFormat).toBeEnabled());
 
   fireEvent.click(screen.getByRole("button", { name: /^force reformat$/i }));
@@ -317,6 +355,13 @@ test("confirms an eligible quick format with an opaque native token", async () =
   fireEvent.change(within(forceDialog).getByLabelText(/force reformat confirmation/i), {
     target: { value: "FORCE REFORMAT" },
   });
+  expect(forceSubmit).toBeEnabled();
+  fireEvent.click(forceSubmit);
+  expect(
+    await within(forceDialog).findByText(
+      /force reformat needs a hardware-stable current card identity/i,
+    ),
+  ).toBeInTheDocument();
   expect(forceSubmit).toBeEnabled();
   fireEvent.click(within(forceDialog).getByRole("button", { name: /cancel/i }));
 
@@ -340,6 +385,7 @@ test("confirms an eligible quick format with an opaque native token", async () =
       sourceIdentityConfidence: "hardware_immutable",
     },
   });
+  expect(formatEligibilityChecks).toBeGreaterThanOrEqual(2);
 
   fireEvent.click(screen.getByRole("button", { name: /quick format card/i }));
   await waitFor(() => {

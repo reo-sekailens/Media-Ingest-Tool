@@ -6,6 +6,15 @@
 - **Portable destination projection:** Planner components are normalized for Windows-compatible names and byte limits; the copy primitive independently rejects unportable destinations.
 - **Portable collision keys:** Planner collision checks use NFC normalization and Unicode default case folding before deterministic suffixing.
 - **Destination scheduling:** Native operations lease a resolved destination root so independent destinations run concurrently while same-root operations serialize conservatively.
+- **UI responsiveness:** All current ingest scan/planning, copy/verification,
+  and preflight filesystem work runs on Tauri blocking workers. Per-operation
+  progress IPC is coalesced to one event per 100 ms while exact native byte
+  counters and terminal lifecycle events remain authoritative.
+- **Timestamp folders:** Camera-day and interval destination levels use
+  portable ISO 8601 basic timestamps (`YYYYMMDDTHHMMSS+HHMM`) built from the
+  aware EXIF capture offset. A naive EXIF timestamp preserves its recorded
+  camera wall clock for grouping and uses an `-offset-unknown` label until an
+  explicit camera timezone policy exists.
 - **Priority:** P0
 - **Owner:** Unassigned
 - **Depends on:** TASK001 (Tauri/Rust/React/TypeScript/Tailwind foundation), TASK002 (storage discovery and stable device/volume identity), TASK007 (local state and destination/camera profiles)
@@ -57,11 +66,11 @@ Resolve one `CaptureTimestamp` with the source and confidence attached. Use this
 
 1. Exif/XMP original capture time with explicit UTC offset and optional subseconds.
 2. Container/QuickTime creation or original date with an explicit offset.
-3. Exif original time without offset, interpreted with the explicitly configured camera timezone.
+3. Exif original time without offset, retained as its recorded camera wall clock with an explicitly unknown offset until a saved camera/device timezone policy is available.
 4. Container time without offset, interpreted only by a saved per-camera/device policy.
 5. Source filesystem modification time, marked `filesystem_fallback`.
 
-Never use destination creation time, ingest time, or platform `ctime` as capture time. Never silently assume the host's current timezone. Persist the original wall time, parsed offset, chosen IANA zone, normalized instant when available, ambiguity flag, and the exact source tag. QuickTime timestamps need format-specific treatment; the maintained QuickTime table notes that timezone behavior varies by tag: [ExifTool QuickTime tag notes](https://exiftool.org/TagNames/QuickTime.html). Use an embedded/pinned IANA timezone database for deterministic Windows/macOS/Linux results: [IANA Time Zone Database](https://www.iana.org/time-zones).
+Never use destination creation time, ingest time, platform `ctime`, or the ingest host's timezone as capture time. When EXIF has no offset, retain its wall clock and mark the destination offset unknown; apply a configured camera/device timezone only after that policy exists. Persist the original wall time, parsed offset, chosen IANA zone, normalized instant when available, ambiguity flag, and the exact source tag. QuickTime timestamps need format-specific treatment; the maintained QuickTime table notes that timezone behavior varies by tag: [ExifTool QuickTime tag notes](https://exiftool.org/TagNames/QuickTime.html). Use an embedded/pinned IANA timezone database for deterministic Windows/macOS/Linux results: [IANA Time Zone Database](https://www.iana.org/time-zones).
 
 Support these sort modes:
 
@@ -203,6 +212,16 @@ Ship conservative defaults, expose advanced overrides only after tests, and stor
   folder/camera/day/30-minute ordering, verified destination bytes, and a
   sealed receipt. It writes only a temporary destination and leaves source
   fixture files and the card marker intact.
+
+- 2026-08-28 — Custom-folder configuration now presents one input per custom
+  destination depth. Its value is the sole emitted path component; older
+  persisted label/value entries retain only their value in the destination
+  projection. Browser fixture and Rust planner/copy tests cover this behavior.
+
+- 2026-08-28 — Destination-depth tags now use both native HTML drag/drop and
+  pointer-enter reordering while pressed, fixing browser button-drag gaps.
+  The result remains a complete ordered permutation with stale previews
+  discarded. Fixture tests and browser automation verified a real reorder.
 
 - [ ] Windows, macOS, and Linux enumerate and copy every regular file in the fixture tree without following any link/reparse/mount escape.
 - [ ] Two connected cards ingest concurrently, while configured source/destination permits and the memory cap are never exceeded.
