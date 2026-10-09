@@ -1,0 +1,91 @@
+name: Native packages
+
+on:
+  workflow_call:
+    inputs:
+      source-ref:
+        description: Full 40-character source commit SHA to package
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,rpm,appimage
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            bundles: deb,rpm,appimage
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: dmg
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            bundles: dmg
+    env:
+      SOURCE_REF: ${{ inputs.source-ref }}
+      ARTIFACT_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Validate immutable source revision
+        run: |
+          if [[ ! "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::source-ref must be a full 40-character source commit SHA."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-ref }}
+          persist-credentials: false
+      - name: Verify checked-out source revision
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_REF"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Activate repository Rust toolchain and build target
+        run: |
+          rustc --version
+          cargo --version
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: package-${{ matrix.target }}
+      - name: Install Linux build and packaging prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl file libayatana-appindicator3-dev \
+            libdbus-1-dev libfuse2 libgtk-3-dev librsvg2-dev libssl-dev \
+            libwebkit2gtk-4.1-dev libxdo-dev patchelf wget xdg-utils
+      - run: npm ci
+      - name: Build native installers from locked dependencies
+        env:
+          # Ad-hoc macOS signatures are not Developer ID signatures or notarization.
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+        run: npm run tauri build -- --ci --bundles ${{ matrix.bundles }} --target ${{ matrix.target }} -- --locked
+      - name: Stage packages with source provenance and checksums
+        run: GITHUB_SHA="$SOURCE_REF" node scripts/package-artifacts.mjs stage src-tauri/target/${{ matrix.target }}/release/bundle package-assets ${{ matrix.target }}
+      - name: Upload package assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.target }}
+          path: package-assets/
+          if-no-files-found: error

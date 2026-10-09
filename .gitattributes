@@ -1,2 +1,5 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Keep checkout line endings consistent with Prettier on every build runner.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary

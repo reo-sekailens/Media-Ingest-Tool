@@ -984,28 +984,28 @@ mod platform {
     fn disk_info_from_plist(dictionary: &plist::Dictionary) -> Option<DiskInfo> {
         let capacity_bytes = integer(dictionary, "TotalSize")?;
         Some(DiskInfo {
-            name: string(&dictionary, "VolumeName"),
-            filesystem: string(&dictionary, "FilesystemType"),
-            volume_uuid: string(&dictionary, "VolumeUUID"),
+            name: string(dictionary, "VolumeName"),
+            filesystem: string(dictionary, "FilesystemType"),
+            volume_uuid: string(dictionary, "VolumeUUID"),
             capacity_bytes: Some(capacity_bytes),
             // `diskutil info -plist` names the aggregate field
             // `RemovableMediaOrExternalDevice`. Preserve the older/component
             // spellings as defensive compatibility aliases. An SD card behind
             // a USB reader is normally a mounted partition under `Partitions`,
             // not a whole-disk entry. Explicitly virtual disks never qualify.
-            removable: (boolean(&dictionary, "RemovableMediaOrExternalDevice")
-                || boolean(&dictionary, "RemovableMediaOrExternal")
-                || boolean(&dictionary, "RemovableMedia")
-                || boolean(&dictionary, "Ejectable"))
-                && !string(&dictionary, "VirtualOrPhysical")
+            removable: (boolean(dictionary, "RemovableMediaOrExternalDevice")
+                || boolean(dictionary, "RemovableMediaOrExternal")
+                || boolean(dictionary, "RemovableMedia")
+                || boolean(dictionary, "Ejectable"))
+                && !string(dictionary, "VirtualOrPhysical")
                     .is_some_and(|kind| kind.eq_ignore_ascii_case("virtual")),
-            internal: boolean(&dictionary, "Internal"),
+            internal: boolean(dictionary, "Internal"),
             // A missing writable field is not evidence that source files are
             // readable. Refuse it rather than relying on a negated, absent
             // `ReadOnlyVolume` field.
-            writable: boolean(&dictionary, "WritableVolume"),
-            vendor: string(&dictionary, "DeviceVendor"),
-            model: string(&dictionary, "MediaName").or_else(|| string(&dictionary, "DeviceModel")),
+            writable: boolean(dictionary, "WritableVolume"),
+            vendor: string(dictionary, "DeviceVendor"),
+            model: string(dictionary, "MediaName").or_else(|| string(dictionary, "DeviceModel")),
         })
     }
 
@@ -1037,7 +1037,8 @@ mod platform {
                             <key>MountPoint</key><string>/Volumes/CAMERA</string>
                         </dict></array>
                     </dict></array>
-                </dict></plist>"#,
+                </dict></plist>"#
+                    .as_slice(),
             )
             .expect("fixture plist");
             let identifiers = disk_entries(&root)
@@ -1058,7 +1059,8 @@ mod platform {
                             <key>MountPoint</key><string>/Volumes/CAMERA</string>
                         </dict></array>
                     </dict></array>
-                </dict></plist>"#,
+                </dict></plist>"#
+                    .as_slice(),
             )
             .expect("fixture plist");
             let identifiers = disk_entries(&root)
@@ -1070,14 +1072,15 @@ mod platform {
 
         #[test]
         fn parses_only_complete_structured_removable_volume_evidence() {
-            let value = Value::from_reader_xml(
+            let mut value = Value::from_reader_xml(
                 br#"<?xml version="1.0"?><plist version="1.0"><dict>
                     <key>TotalSize</key><integer>1024</integer>
                     <key>RemovableMediaOrExternalDevice</key><true/>
                     <key>Internal</key><false/><key>WritableVolume</key><true/>
                     <key>VolumeUUID</key><string>F00D</string>
                     <key>FilesystemType</key><string>exfat</string>
-                </dict></plist>"#,
+                </dict></plist>"#
+                    .as_slice(),
             )
             .expect("fixture plist")
             .into_dictionary()

@@ -2,6 +2,28 @@
 
 ## Current focus
 
+### 2026-10-10 nightly and release packaging
+
+- Nightly packaging snapshots the latest default-branch commit at 02:17
+  Asia/Singapore and publishes a dated, commit-specific GitHub prerelease.
+  The user selected publication from the latest commit, without daily source
+  commits. Manual dispatch is also available.
+- Version-tag pushes and manual existing-tag dispatch build the exact tag and
+  require the package, npm lock, Cargo, and Tauri versions to agree. SemVer
+  prerelease tags remain prereleases. Published releases/assets are not replaced.
+- Both channels share five native builds: Windows x64 EXE/MSI, Intel and Apple
+  Silicon macOS DMG, Linux x64/ARM64 DEB/RPM/AppImage. Every quality job and
+  target must succeed before write-permission publication. Combined manifests
+  require all target formats, verified SHA-256/size and matching source/version
+  provenance. Build runners are not runtime or hardware certification.
+- Confirmed earlier CI failures were repaired: LF checkout policy for Windows,
+  macOS plist test reader/mutability and needless-borrow errors, and Linux
+  mountinfo owned-string lifetime. These preserve discovery/format policy.
+- Local packaging/release tests and source-derived parser fixtures pass; hosted
+  packaging/publication and native cross-platform checks remain pending. Current
+  builds require no signing secrets: Windows/Linux are unsigned and macOS is
+  ad-hoc signed, without Developer ID signing or notarization.
+
 Implement the remaining TASK004 recovery/durability boundaries alongside conservative TASK002 device identity evidence.
 
 - macOS now starts a native Disk Arbitration run-loop subscription before its

@@ -1,0 +1,66 @@
+name: Release packages
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag (must match all checked-in versions)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      source-ref: ${{ steps.metadata.outputs.source-ref }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      title: ${{ steps.metadata.outputs.title }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+    steps:
+      - name: Check out the existing release tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - id: metadata
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: node scripts/release-metadata.mjs resolve release
+
+  quality:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    with:
+      source-ref: ${{ needs.version.outputs.source-ref }}
+      check-only: true
+
+  packages:
+    needs: version
+    uses: ./.github/workflows/packages.yml
+    with:
+      source-ref: ${{ needs.version.outputs.source-ref }}
+
+  publish:
+    needs: [version, quality, packages]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      source-ref: ${{ needs.version.outputs.source-ref }}
+      tag: ${{ needs.version.outputs.tag }}
+      title: ${{ needs.version.outputs.title }}
+      channel: release
+      prerelease: ${{ needs.version.outputs.prerelease == 'true' }}

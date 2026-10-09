@@ -1,0 +1,65 @@
+name: Publish verified packages
+
+on:
+  workflow_call:
+    inputs:
+      source-ref:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+      title:
+        required: true
+        type: string
+      channel:
+        required: true
+        type: string
+      prerelease:
+        required: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          path: downloaded-packages
+      - name: Verify every target and combine checksums
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source-ref }}
+        run: GITHUB_SHA="$SOURCE_REF" node scripts/package-artifacts.mjs collect downloaded-packages release-assets
+      - name: Write provenance and certification notes
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: node scripts/release-metadata.mjs notes "$CHANNEL" "$RELEASE_TAG"
+      - name: Publish complete release without replacing existing assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REF: ${{ inputs.source-ref }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TITLE: ${{ inputs.title }}
+          CHANNEL: ${{ inputs.channel }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          options=(--target "$SOURCE_REF" --title "$RELEASE_TITLE" --notes-file RELEASE_NOTES.md)
+          if [[ "$CHANNEL" == "release" ]]; then options+=(--verify-tag); fi
+          if [[ "$PRERELEASE" == "true" ]]; then options+=(--prerelease --latest=false); fi
+          gh release create "$RELEASE_TAG" release-assets/* "${options[@]}"
+          gh release view "$RELEASE_TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"

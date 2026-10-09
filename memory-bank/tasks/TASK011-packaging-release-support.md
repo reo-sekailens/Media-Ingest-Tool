@@ -1,6 +1,6 @@
 # TASK011 — Packaging, release, and supported-platform contract
 
-- **Status:** in progress — local unsigned Windows x64 NSIS packaging completed on 2026-08-23. macOS now declares a 13.0 minimum and hardened runtime in its Tauri platform configuration, and CI has an unsigned macOS `.app`/DMG build artifact gate. Signing, clean-machine install/start proof, executed macOS CI, notarization, SBOM, and hardware-certification-dependent release support remain pending.
+- **Status:** in progress — five-target nightly/versioned package automation is implemented. Hosted build/publication verification, signing/notarization, clean-machine install/start, SBOM, audits, and hardware-certified runtime support remain pending.
 - **Depends on:** TASK001, TASK009, TASK010
 
 ## Objective
@@ -27,6 +27,30 @@ Ship reproducible native desktop artifacts and publish an honest support contrac
 - Release notes disclose any `partial` or `blocked` certification row.
 
 ## Verification evidence
+
+### 2026-10-10 nightly and release automation
+
+Nightly publication runs at 02:17 Asia/Singapore from one immutable snapshot of
+the latest default-branch commit. It creates a dated commit-specific prerelease,
+without source commits or moving existing release tags. Manual dispatch is
+available. Version-tag pushes and manual existing tags validate matching npm,
+lockfile, Cargo, and Tauri versions; SemVer prereleases retain that status.
+
+Reusable builds cover Windows x64 EXE/MSI, macOS Intel/Apple Silicon DMG, and
+Linux x64/ARM64 DEB/RPM/AppImage. Quality and packaging run in parallel, while
+publication requires every job and target to succeed. Only the publisher receives
+write permission. It verifies the full matrix, required formats, hashes, sizes,
+source SHA and version provenance before uploading combined manifests/packages.
+Published releases/assets are never overwritten. Failed drafts require inspection
+and removal before a full rerun; original source commits remain rollback anchors.
+
+The observed CI failures in Windows checkout line endings, macOS plist reader
+fixtures/Clippy, and Linux mountinfo lifetime are corrected without changing
+hardware policy. Local Node safeguards and four source-derived platform fixtures
+pass. Hosted native checks, packages and publication remain unverified. Windows
+and Linux packages are unsigned; Mac packages use ad-hoc signing, without
+Developer ID signing/notarization. These are package targets, not new runtime or
+hardware certification claims. SBOM, audits and clean-machine checks remain open.
 
 - Native CI logs and artifact hashes for every supported OS/architecture pair.
 - Install/start/uninstall smoke-test records from clean machines or clean user profiles.

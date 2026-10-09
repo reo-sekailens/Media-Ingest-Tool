@@ -154,9 +154,8 @@ fn block_for_mount(root: &Path) -> Result<String, FormatProviderError> {
         .lines()
         .filter_map(mountinfo_entry)
         .find(|(mount, _)| *mount == target)
-        .and_then(|(_, source)| source.strip_prefix("/dev/"))
+        .and_then(|(_, source)| source.strip_prefix("/dev/").map(str::to_owned))
         .filter(|block| safe_block_name(block))
-        .map(str::to_owned)
         .ok_or(FormatProviderError::TargetUnavailable)
 }
 

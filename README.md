@@ -18,6 +18,26 @@ npm run tauri dev
 
 The app has no broad frontend filesystem or shell access. Native functionality is exposed only through narrow typed Rust commands.
 
+## Continuous verification and packaging
+
+The Quality workflow follows the checked-in Node/Rust policies and lockfiles and checks the frontend, native Rust, and packaging safeguards on Windows, macOS, and Linux. Normal pushes and pull requests also build a macOS app/DMG. Nightly and release workflows run those checks and the following package builds in parallel; publication requires every check and target to pass.
+
+| Platform | Architecture        | Packages           | Build runner        |
+| -------- | ------------------- | ------------------ | ------------------- |
+| Windows  | x64                 | EXE (NSIS), MSI    | Windows Server 2022 |
+| macOS    | Intel x64           | DMG                | macOS 15 Intel      |
+| macOS    | Apple Silicon ARM64 | DMG                | macOS 15 ARM64      |
+| Linux    | x64                 | DEB, RPM, AppImage | Ubuntu 22.04        |
+| Linux    | ARM64               | DEB, RPM, AppImage | Ubuntu 22.04 ARM64  |
+
+**Nightlies:** [Nightly packages](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/workflows/nightly.yml) runs every night at **02:17 Asia/Singapore** (18:17 UTC). It snapshots the latest default-branch commit and publishes an immutable `nightly-YYYYMMDD-<12-character-SHA>` prerelease on the [Releases page](https://github.com/reo-sekailens/Media-Ingest-Tool/releases). It creates no source commits. The same workflow can run manually; an already-published snapshot is never overwritten. GitHub scheduling can be delayed and may disable schedules after 60 days of public-repository inactivity ([GitHub schedule documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)).
+
+**Versioned releases:** update the versions in `package.json`, `package-lock.json` (including its root package), `src-tauri/Cargo.toml`/`Cargo.lock`, and `src-tauri/tauri.conf.json` together. Commit that version, create a matching `vX.Y.Z` tag, and push it. [Release packages](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/workflows/release.yml) validates the version and publishes the exact tagged commit. Tags such as `v1.0.0-rc.1` create prereleases; stable versions create normal releases. Manual dispatch accepts an existing matching tag. The workflow refuses to replace an existing release or its assets; a failed draft must be inspected and removed before a full rerun. No signing secrets are required for the current unsigned builds.
+
+Every package is named with its target architecture. Downloads include combined `SHA256SUMS` and `artifact-manifest.json` with the exact source commit, application version, and toolchain policies. The publisher checks hashes, sizes, provenance, versions, required formats, and all five targets before creating the release. For example, run `sha256sum --check SHA256SUMS` after downloading every listed package, or compare a selected file with `Get-FileHash -Algorithm SHA256` on Windows.
+
+Windows and Linux packages are unsigned. macOS uses ad-hoc signing, which is not Developer ID signing or notarization. Runner versions and generated packages do not certify runtime or removable-media support. Clean-machine installation, signing/notarization, dependency security audits, SBOM generation, and hardware certification remain in [TASK011](memory-bank/tasks/TASK011-packaging-release-support.md). The existing manual macOS-only installer workflow remains available.
+
 ## Evidence-oriented project workflow
 
 The repository includes an evidence-oriented memory bank and project entry points:

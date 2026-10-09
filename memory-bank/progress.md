@@ -1,5 +1,21 @@
 # Progress
 
+## 2026-10-10
+
+- Added reusable five-target package builds plus nightly and version-tag release
+  workflows. Nightlies are scheduled for 02:17 Asia/Singapore from the latest
+  default-branch commit; the user explicitly chose no daily source commits.
+  Exact source snapshots and dated nightlies avoid moving published tags/assets.
+- Publication requires quality checks and every package target, and verifies
+  all required formats, SHA-256/size, application/toolchain versions, and exact
+  source provenance. Version tags must match package/lock/Cargo/Tauri versions.
+  Release notes disclose unsigned/ad-hoc signing and uncertified hardware.
+- Repaired observed Windows LF-checkout, macOS plist fixture/Clippy, and Linux
+  owned-string lifetime CI failures. Local package/metadata regression tests
+  and four source-derived platform fixtures pass. Hosted package build/release
+  and native Linux/macOS checks remain pending; clean-machine and hardware
+  certification, signing/notarization, SBOM and dependency audits remain open.
+
 ## 2026-08-29
 
 - Replaced non-standard `HH-mm_offset` interval folders with portable ISO 8601

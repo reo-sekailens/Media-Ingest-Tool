@@ -6,41 +6,49 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   dmg:
     name: DMG (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: Intel
-            runner: macos-13
+            runner: macos-15-intel
             target: x86_64-apple-darwin
             artifact: media-ingest-tool-macos-intel-dmg
           - name: Apple Silicon
-            runner: macos-14
+            runner: macos-15
             target: aarch64-apple-darwin
             artifact: media-ingest-tool-macos-apple-silicon-dmg
     env:
-      # Ad-hoc signing prevents the damaged-app failure common on downloaded
-      # Apple Silicon artifacts. It is deliberately not notarization.
+      # Ad-hoc signing is not Developer ID signing or notarization.
       APPLE_SIGNING_IDENTITY: "-"
+      ARTIFACT_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Activate repository Rust toolchain and build target
+        run: |
+          rustc --version
+          rustup target add ${{ matrix.target }}
       - run: npm ci
       - name: Build direct-download DMG
-        run: npm run tauri build -- --bundles dmg --target ${{ matrix.target }}
+        run: npm run tauri build -- --ci --bundles dmg --target ${{ matrix.target }} -- --locked
+      - name: Record DMG checksums and source provenance
+        run: node scripts/write-dmg-manifest.mjs src-tauri/target/${{ matrix.target }}/release/bundle/dmg
       - name: Publish installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           if-no-files-found: error
-          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/
