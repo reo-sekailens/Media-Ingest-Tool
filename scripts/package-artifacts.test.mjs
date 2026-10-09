@@ -49,16 +49,13 @@ async function bundle(root, target) {
   return directory;
 }
 
-async function downloadedPackages(root) {
+async function downloadedPackages(root, prepareBundle) {
   const download = path.join(root, "download");
   await mkdir(download);
   for (const target of targets) {
-    await cli([
-      "stage",
-      await bundle(root, target),
-      path.join(download, `packages-${target}`),
-      target,
-    ]);
+    const input = await bundle(root, target);
+    await prepareBundle?.(input, target);
+    await cli(["stage", input, path.join(download, `packages-${target}`), target]);
   }
   return download;
 }
@@ -199,6 +196,53 @@ test("stage excludes macOS application resources from installer staging", async 
     await readFile(path.join(output, "artifact-manifest.json"), "utf8"),
   );
   assert.equal(manifest.artifacts.length, 1);
+});
+
+test("AppDir internal links and resources are excluded while Linux packages stage and collect", async (t) => {
+  const root = await fixture(t);
+  const linuxTargets = targets.filter((target) => target.includes("linux"));
+  const download = await downloadedPackages(root, async (input, target) => {
+    if (!linuxTargets.includes(target)) return;
+    const appDir = path.join(input, "nested packages", "Media Ingest Tool.AppDir");
+    const resources = path.join(appDir, "resources");
+    await mkdir(resources, { recursive: true });
+    for (const extension of TARGET_FORMATS[target]) {
+      await writeFile(
+        path.join(resources, `not-an-installer${extension}`),
+        "application resource",
+      );
+    }
+    await symlink(
+      resources,
+      path.join(appDir, ".DirIcon"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+  });
+  const output = path.join(root, "release");
+  await cli(["collect", download, output]);
+  const manifest = JSON.parse(
+    await readFile(path.join(output, "artifact-manifest.json"), "utf8"),
+  );
+  assert.equal(manifest.artifacts.length, 10);
+  assert.ok(
+    manifest.artifacts.every((artifact) => !artifact.file.includes("not-an-installer")),
+  );
+  for (const target of linuxTargets) {
+    const artifacts = manifest.artifacts.filter(
+      (artifact) => artifact.target === target,
+    );
+    assert.deepEqual(
+      artifacts.map((artifact) => path.extname(artifact.file)).sort(),
+      [...TARGET_FORMATS[target]].sort(),
+    );
+    for (const artifact of artifacts) {
+      const contents = await readFile(path.join(output, artifact.file));
+      assert.equal(
+        artifact.sha256,
+        createHash("sha256").update(contents).digest("hex"),
+      );
+    }
+  }
 });
 
 test("collect verifies all targets and produces a complete global manifest and checksums", async (t) => {

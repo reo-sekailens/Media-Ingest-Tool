@@ -151,9 +151,10 @@ async function bundleFiles(root, directory = root) {
     const info = await lstat(file);
     if (info.isSymbolicLink()) throw new Error(`Bundle contains a symlink: ${file}`);
     if (info.isDirectory()) {
-      // An application bundle is not a distribution package; its internal
-      // framework links and resources do not belong in installer staging.
-      if (!entry.name.endsWith(".app")) files.push(...(await bundleFiles(root, file)));
+      // Application bundles and AppImage staging trees are not distribution
+      // packages; their internal links and resources are not installer inputs.
+      if (!entry.name.endsWith(".app") && !entry.name.endsWith(".AppDir"))
+        files.push(...(await bundleFiles(root, file)));
     } else if (info.isFile()) {
       files.push(file);
     } else {
