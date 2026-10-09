@@ -1,6 +1,6 @@
 # TASK011 — Packaging, release, and supported-platform contract
 
-- **Status:** in progress — five-target nightly/versioned package automation is implemented. Hosted build/publication verification, signing/notarization, clean-machine install/start, SBOM, audits, and hardware-certified runtime support remain pending.
+- **Status:** in progress — five-target automation, hosted Quality and nightly package publication are verified. Version-tag publication, signing/notarization, clean-machine install/start, SBOM, audits, and hardware-certified runtime support remain pending.
 - **Depends on:** TASK001, TASK009, TASK010
 
 ## Objective
@@ -47,10 +47,36 @@ and removal before a full rerun; original source commits remain rollback anchors
 The observed CI failures in Windows checkout line endings, macOS plist reader
 fixtures/Clippy, and Linux mountinfo lifetime are corrected without changing
 hardware policy. Local Node safeguards and four source-derived platform fixtures
-pass. Hosted native checks, packages and publication remain unverified. Windows
+pass. Hosted native checks, package builds and nightly publication pass. Windows
 and Linux packages are unsigned; Mac packages use ad-hoc signing, without
 Developer ID signing/notarization. These are package targets, not new runtime or
 hardware certification claims. SBOM, audits and clean-machine checks remain open.
+
+First hosted runs passed frontend checks on every OS, Windows native checks,
+Windows EXE/MSI, Apple Silicon DMG, and Linux x64/ARM64 bundle generation.
+Native macOS/Linux tests exposed a Windows-separator assumption in a folder-order
+assertion; native Path/component comparisons correct it, and subsequent macOS
+native checks pass. Staging also encountered generated Linux AppDir resource
+links; AppDir work trees are excluded alongside macOS app bundles while package
+file checks remain intact. All 16 Node safeguards pass, including regression
+coverage for staging and collecting both Linux targets beside linked resources.
+Hosted [Quality run 37992003693](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/37992003693)
+passes for `ac2c4f7`: all frontend checks, locked native fmt/Clippy/tests, and the
+macOS app/DMG smoke package. Native suites pass on Linux (101 passed, five
+hardware cases ignored), macOS (104/five), and Windows (105/seven). All five
+package uploads are generated.
+
+[Nightly run 37991545928](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/37991545928)
+passes all required quality and package jobs and publishes
+[nightly-20261010-ac2c4f7afb20](https://github.com/reo-sekailens/Media-Ingest-Tool/releases/tag/nightly-20261010-ac2c4f7afb20)
+from source `ac2c4f7afb2071c766441bcaa20747f9d7503278`. All ten packages
+and both metadata assets are uploaded. Independent checks compare each GitHub
+asset size/digest to the published manifest and SHA256SUMS, verify the downloaded
+metadata hashes against GitHub, and verify the remote tag's exact source SHA.
+The release is published and marked prerelease. A version-tag release was not
+issued; its metadata safeguards and workflow syntax/trigger configuration are
+verified locally. This completes the requested automation work, while TASK011
+remains open for signing, runtime installation, SBOM/audits and certification.
 
 - Native CI logs and artifact hashes for every supported OS/architecture pair.
 - Install/start/uninstall smoke-test records from clean machines or clean user profiles.

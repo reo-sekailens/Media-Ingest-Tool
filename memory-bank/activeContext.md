@@ -19,10 +19,30 @@
 - Confirmed earlier CI failures were repaired: LF checkout policy for Windows,
   macOS plist test reader/mutability and needless-borrow errors, and Linux
   mountinfo owned-string lifetime. These preserve discovery/format policy.
-- Local packaging/release tests and source-derived parser fixtures pass; hosted
-  packaging/publication and native cross-platform checks remain pending. Current
+- All 16 local Node safeguards, scoped ESLint/Prettier, Actionlint, whitespace,
+  and memory-bank validation pass. Hosted Quality for `ac2c4f7` passes frontend
+  checks, strict Rust fmt/Clippy, native tests (Linux 101, macOS 104, Windows 105
+  passed; hardware cases ignored), and the macOS app/DMG smoke package. Current
   builds require no signing secrets: Windows/Linux are unsigned and macOS is
   ad-hoc signed, without Developer ID signing or notarization.
+- First hosted verification passed frontend checks on every OS and produced
+  Windows EXE/MSI, Apple Silicon DMG, and both Linux package sets. macOS/Linux
+  tests exposed a Windows-separator assertion; it now uses native path
+  components, and subsequent macOS native checks pass. Linux staging exposed
+  legitimate AppDir internal links; generated AppDir trees are now excluded
+  alongside app bundles. All 16 Node safeguards pass, including Linux staging
+  and collection regression coverage.
+- [Nightly run 37991545928](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/37991545928)
+  passes every required job and publishes
+  [nightly-20261010-ac2c4f7afb20](https://github.com/reo-sekailens/Media-Ingest-Tool/releases/tag/nightly-20261010-ac2c4f7afb20)
+  from exact source `ac2c4f7afb2071c766441bcaa20747f9d7503278`. All five
+  targets and ten packages are present, plus combined manifest/checksums.
+  GitHub asset hashes/sizes match the manifest, downloaded metadata hashes match
+  GitHub, and the remote tag matches the source SHA. Versioned publication has
+  local metadata/trigger validation but no version-tag release was issued.
+  Clean-machine installation, signing/notarization, hardware checks, SBOM and
+  dependency audits remain separate pending gates. Earlier app/UI/interval
+  changes were preserved locally outside the packaging commits.
 
 Implement the remaining TASK004 recovery/durability boundaries alongside conservative TASK002 device identity evidence.
 

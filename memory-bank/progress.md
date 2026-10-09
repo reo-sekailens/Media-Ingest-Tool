@@ -12,9 +12,27 @@
   Release notes disclose unsigned/ad-hoc signing and uncertified hardware.
 - Repaired observed Windows LF-checkout, macOS plist fixture/Clippy, and Linux
   owned-string lifetime CI failures. Local package/metadata regression tests
-  and four source-derived platform fixtures pass. Hosted package build/release
-  and native Linux/macOS checks remain pending; clean-machine and hardware
+  and four source-derived platform fixtures pass. Clean-machine and hardware
   certification, signing/notarization, SBOM and dependency audits remain open.
+- First hosted runs verified all frontend platforms, Windows native checks and
+  EXE/MSI, Apple Silicon DMG, and Linux x64/ARM64 package generation. Replaced a
+  Windows-only folder-test assertion with native path comparisons; macOS native
+  checks pass after that fix. Excluded generated AppDir resources from staging
+  without relaxing package-file validation. All 16 Node safeguards now pass;
+  hosted publication passes. Hosted Quality for `ac2c4f7` passes
+  frontend/native checks on every OS and the macOS app/DMG smoke package.
+  Native suites pass: Linux 101 (five ignored), macOS 104 (five ignored),
+  Windows 105 (seven ignored). All five package uploads are generated.
+- [Nightly run 37991545928](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/37991545928)
+  succeeds and publishes
+  [nightly-20261010-ac2c4f7afb20](https://github.com/reo-sekailens/Media-Ingest-Tool/releases/tag/nightly-20261010-ac2c4f7afb20)
+  from `ac2c4f7afb2071c766441bcaa20747f9d7503278`. Verified all five
+  targets, ten packages, twelve uploaded assets, and exact source/tag binding.
+  GitHub package digests/sizes agree with the manifest and SHA256SUMS; downloaded
+  metadata digests agree with GitHub. The release is a published prerelease.
+  No version-tag release or clean-machine/hardware test was issued. Signing,
+  notarization, SBOM and audits remain open. Earlier app/interval/UI changes
+  remain uncommitted; only packaging changes and required CI fixes were pushed.
 
 ## 2026-08-29
 
