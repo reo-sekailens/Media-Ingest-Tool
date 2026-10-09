@@ -638,9 +638,12 @@ mod tests {
             4,
             "day, one custom folder, camera, filename"
         );
+        assert!(path.starts_with(Path::new("20260828T000000+0000").join("Ari")));
         assert!(path
-            .to_string_lossy()
-            .starts_with("20260828T000000+0000\\Ari\\FX3__"));
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("FX3__")));
         assert!(is_portable_destination_relative_path(&path));
     }
 
