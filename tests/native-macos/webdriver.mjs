@@ -22,6 +22,7 @@ const standardErrors = new Set([
 function endpointCategory(endpoint) {
   if (endpoint === "/session") return "create-session";
   if (endpoint === "/status") return "status";
+  if (endpoint === "/wdio/eval") return "direct-eval";
   const routes = [
     [/^\/session\/[^/]+\/execute\/sync$/, "execute-sync"],
     [/^\/session\/[^/]+\/element$/, "find-element"],
@@ -32,8 +33,8 @@ function endpointCategory(endpoint) {
   return routes.find(([pattern]) => pattern.test(endpoint))?.[1] || "other";
 }
 
-// This adapter only speaks the embedded driver's W3C HTTP protocol. It does not
-// install Tauri API mocks, alter command responses, or use a browser dev server.
+// This adapter speaks W3C commands and the official embedded DirectEval route.
+// It does not install Tauri API mocks, alter command responses, or use a dev server.
 export class NativeWebDriver {
   constructor(port, request = fetch) {
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -71,16 +72,26 @@ export class NativeWebDriver {
     } catch {
       throw new Error(`${label} failed: response decoding failed`);
     }
-    if (!response.ok || data.value?.error) {
+    const directEval = endpoint === "/wdio/eval";
+    if (
+      !response.ok ||
+      (!directEval && data?.value?.error) ||
+      (directEval && data?.error)
+    ) {
       // Native exception messages can contain private paths or identifiers.
       // Keep only the standardized error category in published test output.
-      const category = standardErrors.has(data.value?.error)
-        ? data.value.error
-        : "unknown error";
+      const category = directEval
+        ? "script evaluation failed"
+        : standardErrors.has(data?.value?.error)
+          ? data.value.error
+          : "unknown error";
       throw new Error(`${label} failed: HTTP ${response.status}, ${category}`);
     }
-    if (!Object.hasOwn(data, "value")) {
-      throw new Error(`${label} response is missing its W3C value envelope`);
+    if (directEval && data?.undef === true) return undefined;
+    if (!data || !Object.hasOwn(data, "value")) {
+      throw new Error(
+        `${label} response is missing its ${directEval ? "direct-eval" : "W3C"} value envelope`,
+      );
     }
     return data.value;
   }
@@ -104,9 +115,22 @@ export class NativeWebDriver {
   }
 
   async execute(fn, ...args) {
-    return await this.command("POST", this.sessionEndpoint("/execute/sync"), {
-      script: `return (${fn.toString()}).apply(null, arguments);`,
-      args,
+    if (!this.sessionId) throw new Error("A WebDriver session must be created first");
+    // The pinned official Tauri service uses /wdio/eval for the embedded
+    // provider. Its callback contract reaches the macOS callAsyncJavaScript
+    // result channel; W3C execute/sync uses evaluateJavaScript polling instead.
+    return await this.command("POST", "/wdio/eval", {
+      script: `var __cb = arguments[arguments.length - 1];
+(async () => {
+  try {
+    const __result = await (${fn.toString()}).apply(null, ${JSON.stringify(args)});
+    __cb({ ok: true, value: __result === undefined ? null : __result, undef: __result === undefined });
+  } catch {
+    __cb({ ok: false, error: "Native evaluation failed" });
+  }
+})();`,
+      window_label: "main",
+      timeout_ms: 30_000,
     });
   }
 

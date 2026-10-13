@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { runInNewContext } from "node:vm";
 import { NativeWebDriver } from "./webdriver.mjs";
 
 // Transport-contract fixtures check the small HTTP adapter. They do not stand
@@ -26,7 +27,7 @@ test("restricts the driver address to a valid loopback port", () => {
   assert.equal(new NativeWebDriver(4445).baseUrl, "http://127.0.0.1:4445");
 });
 
-test("creates, uses and deletes an actual W3C session envelope", async () => {
+test("creates/deletes W3C sessions and evaluates via the official embedded route", async () => {
   const { driver, requests } = fixtureDriver([
     {
       body: {
@@ -38,15 +39,21 @@ test("creates, uses and deletes an actual W3C session envelope", async () => {
   ]);
   assert.equal((await driver.createSession()).platformName, "macos");
   assert.equal(await driver.execute((number) => number + 1, 2), 3);
-  assert.equal(
-    requests[1].url,
-    "http://127.0.0.1:4445/session/native%2Fsession/execute/sync",
-  );
+  assert.equal(requests[1].url, "http://127.0.0.1:4445/wdio/eval");
   const execute = JSON.parse(requests[1].body);
-  assert.deepEqual(execute.args, [2]);
-  assert.match(execute.script, /^return \(/);
+  assert.equal(execute.window_label, "main");
+  assert.equal(execute.timeout_ms, 30_000);
+  const callback = await new Promise((resolve) => {
+    runInNewContext(`(function() { ${execute.script} }).call(null, callback);`, {
+      callback: resolve,
+    });
+  });
+  assert.equal(callback.ok, true);
+  assert.equal(callback.value, 3);
+  assert.equal(callback.undef, false);
   await driver.deleteSession();
   assert.equal(requests[2].method, "DELETE");
+  assert.equal(requests[2].url, "http://127.0.0.1:4445/session/native%2Fsession");
   assert.equal(driver.sessionId, null);
 });
 
@@ -109,7 +116,7 @@ test("labels rejected and timed-out endpoints without leaking transport data", a
     await assert.rejects(
       driver.execute(() => "script-private"),
       (error) => {
-        assert.equal(error.message, `WebDriver POST execute-sync failed: ${category}`);
+        assert.equal(error.message, `WebDriver POST direct-eval failed: ${category}`);
         assert.doesNotMatch(
           error.stack,
           /\/Users\/private|secret-card|native-session-private|script-private|127\.0\.0\.1/,
@@ -122,6 +129,43 @@ test("labels rejected and timed-out endpoints without leaking transport data", a
       driver.createSession(),
       new RegExp(`WebDriver POST create-session failed: ${category}`),
     );
+  }
+});
+
+test("awaits DirectEval promises and reports undefined and script failures safely", async () => {
+  const { driver, requests } = fixtureDriver([
+    { body: { value: { count: 2 } } },
+    { body: { value: null, undef: true } },
+    { status: 500, body: { error: "/Users/private/secret-card" } },
+  ]);
+  driver.sessionId = "native";
+  assert.deepEqual(await driver.execute(async (count) => ({ count }), 2), { count: 2 });
+  assert.equal(await driver.execute(() => undefined), undefined);
+  await assert.rejects(
+    driver.execute(() => {
+      throw new Error("private-script-error");
+    }),
+    (error) => {
+      assert.equal(
+        error.message,
+        "WebDriver POST direct-eval failed: HTTP 500, script evaluation failed",
+      );
+      assert.doesNotMatch(error.stack, /private-script-error|secret-card/);
+      return true;
+    },
+  );
+  for (const [index, expected] of [
+    [0, { ok: true, value: { count: 2 }, undef: false }],
+    [1, { ok: true, value: null, undef: true }],
+    [2, { ok: false, error: "Native evaluation failed" }],
+  ]) {
+    const result = await new Promise((resolve) => {
+      const { script } = JSON.parse(requests[index].body);
+      runInNewContext(`(function() { ${script} }).call(null, callback);`, {
+        callback: resolve,
+      });
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), expected);
   }
 });
 

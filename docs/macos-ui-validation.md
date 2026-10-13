@@ -22,8 +22,13 @@ macOS release builds. A release bundle must never include the test configuration
 `cargo --all-features` by itself does not authorize starting an automation server.
 
 The JavaScript harness uses Node's built-in `fetch` and `node:test` with the
-driver's standard W3C session, execute, element-click, screenshot, and cleanup
-endpoints. It does not install `tauri-plugin-wdio`, import a frontend test bridge,
+driver's W3C session, element-click, screenshot, and cleanup endpoints. JavaScript
+evaluation follows the pinned official service's `/wdio/eval` callback contract,
+which reaches the macOS `callAsyncJavaScript` result channel and its existing
+WebKit completion-reclaim safeguards. The W3C `execute/sync` polling path bypasses
+those safeguards and timed out before product IPC on macOS 26 ARM runners. The
+harness adds no automatic retries or longer timeouts. It does not install
+`tauri-plugin-wdio`, import a frontend test bridge,
 mock native commands, or substitute a browser/Vite rendering session.
 
 ## Run on a Mac
@@ -73,8 +78,11 @@ The transport adapter has independent, portable contract checks:
 node --test tests/native-macos/webdriver.contract.mjs
 ```
 
-Those checks validate request envelopes, session cleanup, element references,
-sanitized error handling, and bounded waits. They are not native runtime evidence.
+Those checks validate request envelopes, DirectEval callback/promise/undefined
+handling, session cleanup, element references, sanitized error handling, and
+bounded waits. They are not native runtime evidence. The native summary records
+the last fixed startup-stage label and whether startup completed; errors publish
+fixed endpoint categories without scripts, session IDs or private error text.
 
 ## Assertions and artifacts
 
@@ -123,5 +131,8 @@ rows. A Windows transport-test pass cannot replace a macOS smoke run.
 - [WebdriverIO plugin setup](https://webdriver.io/docs/desktop-testing/tauri/plugin-setup) describes the two separate plugins and keeping automation out of production builds.
 - [Official embedded driver source](https://github.com/webdriverio/desktop-mobile/tree/main/packages/tauri-plugin-webdriver) documents the published crate's server, native WKWebView snapshot/evaluation, and DOM action implementation.
 - [Published crate](https://crates.io/crates/tauri-plugin-wdio-webdriver/1.5.0) pins the implementation checked here. Its Tauri dependency starts at 2.10.0 and its Rust minimum is 1.77; the repository's locked Tauri 2.11.5 and Rust 1.98 satisfy those version requirements.
+- [Official embedded DirectEval handler](https://github.com/webdriverio/desktop-mobile/blob/f5cf07da5ada8605b3bc779deac7ed5f49c469f0/packages/tauri-plugin-webdriver/src/server/handlers/direct_eval.rs) defines the callback and HTTP response contract; the published 1.5.0 crate archive is authoritative for the implementation actually tested.
+- [Official embedded service execute path](https://github.com/webdriverio/desktop-mobile/blob/f5cf07da5ada8605b3bc779deac7ed5f49c469f0/packages/tauri-service/src/commands/execute.ts) and [callback wrapper](https://github.com/webdriverio/desktop-mobile/blob/f5cf07da5ada8605b3bc779deac7ed5f49c469f0/packages/tauri-service/src/wrapForDirectEval.ts) select `/wdio/eval` and await the evaluated result.
+- [Official macOS DirectEval implementation](https://github.com/webdriverio/desktop-mobile/blob/f5cf07da5ada8605b3bc779deac7ed5f49c469f0/packages/tauri-plugin-webdriver/src/platform/macos.rs) and [upstream Mac26 fix](https://github.com/webdriverio/desktop-mobile/pull/553) explain the out-of-band result channel, main-loop pump, and completion-reclaim recovery used by this route.
 - [Tauri configuration reference](https://v2.tauri.app/reference/config/) defines the isolated identifier, global API switch, and inline capability configuration.
 - [W3C WebDriver standard](https://www.w3.org/TR/webdriver2/) defines the session/command/value envelopes used by the dependency-free adapter.
