@@ -1,0 +1,16 @@
+{
+  "identifier": "com.mediaingest.tool.macos-ui-tests",
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "capabilities": [
+        "default",
+        {
+          "identifier": "macos-ui-tests",
+          "windows": ["main"],
+          "permissions": ["wdio-webdriver:default"]
+        }
+      ]
+    }
+  }
+}

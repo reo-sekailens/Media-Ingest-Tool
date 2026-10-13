@@ -1,6 +1,6 @@
 # TASK010 — Cross-platform, filesystem, and hardware certification
 
-- **Status:** planned
+- **Status:** in progress — native Intel/ARM macOS software, filesystem-image, UI and package checks pass on 15/26; physical certification remains partial or blocked.
 - **Depends on:** TASK002, TASK003, TASK004, TASK005, TASK006, TASK008, TASK009
 - **Unlocks:** TASK011
 
@@ -12,7 +12,7 @@ Prove behavior with automated fixtures and real sacrificial media on every decla
 
 - Windows 10/11, macOS on Intel and Apple silicon where supported, and Linux with udev/UDisks2; exact minimum versions and CPU architectures must be frozen in TASK011.
 - Source filesystems: FAT16 where applicable, FAT32, exFAT, read-only media, corrupt/dirty media, and unsupported filesystems.
-- Destinations: NTFS, APFS, exFAT, and ext4 plus a documented network-volume policy.
+- Destinations: NTFS, APFS, exFAT, and ext4 plus a documented network-volume policy. Mac exFAT destinations are currently blocked because native exclusive rename is unsupported; exFAT sources to APFS remain in the permitted workflow.
 - Readers: built-in SD slot, generic single-slot USB reader, SanDisk Professional SD/microSD models named in TASK006, PRO-DOCK if in scope, and two identical readers connected simultaneously.
 - Cards: at least two SD and two microSD cards, including two cards with the same vendor/product/capacity; only sacrificial cards may be formatted.
 - Failures: source/destination unplug, read error, write error, full destination, permission denial, sleep/wake, app crash, reboot, hash mismatch, metadata corruption, and duplicate paths.
@@ -39,6 +39,20 @@ Prove behavior with automated fixtures and real sacrificial media on every decla
 - No serial number or host path is published without explicit sanitization.
 
 ## Current evidence boundary
+
+- 2026-10-13: macOS compatibility validation adds native Intel/ARM runners on
+  15/26, real-file core tests on disposable APFS, case-sensitive APFS and exFAT
+  disk images, shipping-DMG startup checks and separate-ID WKWebView/IPC smoke
+  screenshots. [Final Quality run 38351288268](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268)
+  passes all 16 jobs at `0984bc7`, including 142 core tests and 21 mounted-image
+  invocations on each Mac host, plus all four native UI lanes on their first
+  attempt. [Candidate run 38349630929](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38349630929)
+  passes four DMG/signature/install-copy/startup gates at `9e4c4fa`; downloaded
+  hashes/manifests/provenance match. Only the test adapter/contracts/docs differ
+  between these sources. Virtual filesystem evidence is not
+  physical-card, reader, throughput, power-loss, sleep/wake, privacy/quarantine
+  or safe-eject certification. macOS 13.3 is configured but not runtime-tested;
+  macOS formatting remains unavailable. See [the audit](../../docs/macos-compatibility.md).
 
 - The cross-platform GitHub Actions Rust matrix now installs the Linux system
   D-Bus development headers required by the direct UDisks provider before

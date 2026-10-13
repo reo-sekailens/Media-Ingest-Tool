@@ -4,6 +4,9 @@
 //! Native discovery, transfer, verification, and format implementations belong
 //! to their respective TASK001 follow-up modules.
 
+#[cfg(all(target_os = "macos", feature = "macos-ui-tests", not(debug_assertions)))]
+compile_error!("macos-ui-tests must never be enabled in a release package");
+
 pub mod device_discovery;
 pub mod eject_provider;
 pub mod format_profiles;
@@ -85,6 +88,29 @@ struct ActiveIngest {
     /// A device-change notification may arrive before a newly inserted card
     /// has mounted. Only cancel after this exact source was observed first.
     source_seen_in_snapshot: bool,
+}
+
+/// Reserve the source while holding the scheduler lock. Different operation
+/// IDs must not let manual, automatic, and recovery requests read the same
+/// card concurrently or race its completion/marker lifecycle.
+fn register_active_ingest(
+    active_ingests: &mut HashMap<String, ActiveIngest>,
+    operation_id: &str,
+    ingest: ActiveIngest,
+) -> Result<(), &'static str> {
+    if active_ingests.contains_key(operation_id) {
+        return Err("An ingest already uses this operation ID");
+    }
+    if active_ingests.values().any(|active| {
+        active.source_medium_key == ingest.source_medium_key
+            || mount_match_key(&active.source_root) == mount_match_key(&ingest.source_root)
+    }) {
+        return Err(
+            "This source card already has an active ingest; stop it or wait for completion",
+        );
+    }
+    active_ingests.insert(operation_id.to_owned(), ingest);
+    Ok(())
 }
 
 struct CancellationRegistration {
@@ -1110,25 +1136,25 @@ async fn safe_eject(
             Ok(Err(crate::eject_provider::SafeEjectError::DeviceBusy(veto_name))) => {
                 let detail = veto_name
                     .filter(|value| !value.trim().is_empty())
-                    .map(|value| format!(" Windows reported: {value}."))
+                    .map(|value| format!(" The operating system reported: {value}."))
                     .unwrap_or_default();
                 IpcResponse::failure(
                     IpcErrorCode::DeviceUnavailable,
                     format!(
-                        "Windows could not safely remove this card because it is still in use. Close any app or file browser using it, then try again.{detail}"
+                        "The operating system could not safely remove this card because it is still in use. Close any app or file browser using it, then try again.{detail}"
                     ),
                 )
             }
             Ok(Err(crate::eject_provider::SafeEjectError::DeviceNotEjectable)) => {
                 IpcResponse::failure(
                     IpcErrorCode::DeviceUnavailable,
-                    "Windows could not safely remove this card device; remove it manually only after Windows reports it safe",
+                    "The operating system could not safely remove this card device; remove it manually only after the system reports it safe",
                 )
             }
             Ok(Err(crate::eject_provider::SafeEjectError::EjectFailed)) | Err(_) => {
                 IpcResponse::failure(
                     IpcErrorCode::DeviceUnavailable,
-                    "Windows could not confirm that this card was safely ejected",
+                    "The operating system could not confirm that this card was safely ejected",
                 )
             }
         },
@@ -1710,12 +1736,15 @@ fn assign_connection_generations(
 }
 
 fn mount_match_key(value: &str) -> String {
-    let normalized = value.trim().replace('\\', "/");
+    #[cfg(windows)]
+    let normalized = value.trim().replace('\\', "/").to_ascii_lowercase();
+    #[cfg(not(windows))]
+    let normalized = value.to_owned();
     let trimmed = normalized.trim_end_matches('/');
     if trimmed.is_empty() {
         "/".into()
     } else {
-        trimmed.to_ascii_lowercase()
+        trimmed.to_owned()
     }
 }
 
@@ -2171,21 +2200,18 @@ async fn resume_verified_ingest(
         let Ok(mut active_ingests) = state.active_ingests.lock() else {
             return Ok(persistence_failure());
         };
-        if active_ingests.contains_key(&operation_id) {
-            return Ok(IpcResponse::failure(
-                IpcErrorCode::InvalidRequest,
-                "This recovery is already active",
-            ));
-        }
-        active_ingests.insert(
-            operation_id.clone(),
+        if let Err(message) = register_active_ingest(
+            &mut active_ingests,
+            &operation_id,
             ActiveIngest {
                 cancellation: Arc::clone(&cancellation),
                 source_medium_key: recovery.source_identity_key.clone(),
                 source_root: recovery.source_root.clone(),
                 source_seen_in_snapshot: false,
             },
-        );
+        ) {
+            return Ok(IpcResponse::failure(IpcErrorCode::InvalidRequest, message));
+        }
     }
     let _cancellation_registration = CancellationRegistration {
         active_ingests: Arc::clone(&state.active_ingests),
@@ -2371,21 +2397,18 @@ async fn start_verified_ingest(
         let Ok(mut active_ingests) = state.active_ingests.lock() else {
             return Ok(persistence_failure());
         };
-        if active_ingests.contains_key(&operation_id) {
-            return Ok(IpcResponse::failure(
-                IpcErrorCode::InvalidRequest,
-                "An ingest already uses this operation ID",
-            ));
-        }
-        active_ingests.insert(
-            operation_id.clone(),
+        if let Err(message) = register_active_ingest(
+            &mut active_ingests,
+            &operation_id,
             ActiveIngest {
                 cancellation: Arc::clone(&cancellation),
                 source_medium_key: request.source_medium_key.clone(),
                 source_root: request.source_root.clone(),
                 source_seen_in_snapshot: false,
             },
-        );
+        ) {
+            return Ok(IpcResponse::failure(IpcErrorCode::InvalidRequest, message));
+        }
     }
     let _cancellation_registration = CancellationRegistration {
         active_ingests: Arc::clone(&state.active_ingests),
@@ -3701,6 +3724,10 @@ fn error_response(error: IngestError) -> IpcResponse<VerifiedIngestResult> {
             IpcErrorCode::InvalidRequest,
             "A destination file or receipt already exists; existing media was not overwritten",
         ),
+        IngestError::AtomicPublicationUnsupported => IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "This destination cannot safely publish verified files without overwriting existing data. Choose a local APFS destination on macOS. Your source files were preserved",
+        ),
         IngestError::InsufficientDestinationSpace => IpcResponse::failure(
             IpcErrorCode::DeviceUnavailable,
             "The destination does not have enough currently available space for this ingest plan",
@@ -3882,7 +3909,28 @@ fn apply_calibrated_slots(snapshot: &mut DeviceSnapshot, store: &LocalStore) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let builder = tauri::Builder::default();
+    #[cfg(all(target_os = "macos", feature = "macos-ui-tests"))]
+    let builder = {
+        // Keep automation out of manual-install/release artifacts and out of
+        // the production app's profile. These guards also protect accidental
+        // feature-enabled developer launches.
+        assert!(
+            cfg!(debug_assertions),
+            "macOS UI automation requires a debug build"
+        );
+        assert_eq!(
+            context.config().identifier,
+            "com.mediaingest.tool.macos-ui-tests"
+        );
+        assert_eq!(
+            std::env::var("MEDIA_INGEST_MACOS_UI_TESTS").as_deref(),
+            Ok("1")
+        );
+        builder.plugin(tauri_plugin_wdio_webdriver::init())
+    };
+    builder
         .plugin(
             tauri_plugin_log::Builder::new()
                 .clear_targets()
@@ -3963,7 +4011,7 @@ pub fn run() {
             resume_verified_ingest,
             cancel_verified_ingest
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running media-ingest desktop application");
 }
 
@@ -4294,6 +4342,86 @@ mod tests {
     }
 
     #[test]
+    fn source_reservation_rejects_duplicate_card_but_allows_other_cards() {
+        let active = Arc::new(Mutex::new(HashMap::new()));
+        let ingest = |key: &str, root: &str| ActiveIngest {
+            cancellation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            source_medium_key: key.into(),
+            source_root: root.into(),
+            source_seen_in_snapshot: true,
+        };
+        {
+            let mut entries = active.lock().expect("scheduler lock");
+            register_active_ingest(&mut entries, "manual", ingest("card-a", "F:\\"))
+                .expect("first source reservation");
+            assert!(
+                register_active_ingest(&mut entries, "recovery", ingest("card-a", "G:\\")).is_err()
+            );
+            assert!(register_active_ingest(
+                &mut entries,
+                "automatic",
+                ingest("different-key", "F:\\")
+            )
+            .is_err());
+            assert!(
+                register_active_ingest(&mut entries, "manual", ingest("card-b", "M:\\")).is_err()
+            );
+            register_active_ingest(&mut entries, "second-card", ingest("card-b", "M:\\"))
+                .expect("independent card remains concurrent");
+            assert_eq!(entries.len(), 2);
+        }
+        drop(CancellationRegistration {
+            active_ingests: Arc::clone(&active),
+            operation_id: "manual".into(),
+        });
+        register_active_ingest(
+            &mut active.lock().expect("scheduler lock"),
+            "next-insertion",
+            ingest("card-a", "F:\\"),
+        )
+        .expect("terminal cleanup releases the source reservation");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn source_reservation_compares_windows_mounts_case_insensitively() {
+        let ingest = |root: &str| ActiveIngest {
+            cancellation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            source_medium_key: root.into(),
+            source_root: root.into(),
+            source_seen_in_snapshot: true,
+        };
+        let mut active = HashMap::new();
+        register_active_ingest(&mut active, "first", ingest("F:\\"))
+            .expect("first source reservation");
+        assert!(register_active_ingest(&mut active, "second", ingest("f:/")).is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn source_reservation_preserves_distinct_case_sensitive_mounts() {
+        assert_ne!(
+            mount_match_key("/media/Card\\A"),
+            mount_match_key("/media/Card/A")
+        );
+        assert_ne!(
+            mount_match_key("/media/Card "),
+            mount_match_key("/media/Card")
+        );
+        let ingest = |root: &str| ActiveIngest {
+            cancellation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            source_medium_key: root.into(),
+            source_root: root.into(),
+            source_seen_in_snapshot: true,
+        };
+        let mut active = HashMap::new();
+        register_active_ingest(&mut active, "first", ingest("/media/Card"))
+            .expect("first source reservation");
+        register_active_ingest(&mut active, "second", ingest("/media/card"))
+            .expect("distinct case-sensitive mount remains concurrent");
+    }
+
+    #[test]
     fn auto_format_never_runs_for_a_manual_or_empty_ingest() {
         let database =
             std::env::temp_dir().join(format!("auto-format-{}.sqlite3", uuid::Uuid::new_v4()));
@@ -4407,8 +4535,13 @@ mod tests {
 
     #[test]
     fn source_inventory_requires_the_current_medium_and_mount_pairing() {
+        let mount = if cfg!(windows) {
+            "F:\\"
+        } else {
+            "/Volumes/CARD"
+        };
         let volume = device_discovery::volume_from_parts(
-            "F:\\".into(),
+            mount.into(),
             "CARD".into(),
             Some("exFAT".into()),
             None,
@@ -4417,13 +4550,30 @@ mod tests {
         );
         let snapshot = snapshot_from_volumes(1, vec![volume]);
         let request = SourceInventoryRequest {
-            source_root: "f:\\".into(),
+            source_root: if cfg!(windows) {
+                "f:\\".into()
+            } else {
+                mount.into()
+            },
             source_medium_key: snapshot.devices[0].identity.media_key.clone(),
         };
         assert!(source_inventory_matches_current_device(&snapshot, &request));
 
+        #[cfg(not(windows))]
+        assert!(!source_inventory_matches_current_device(
+            &snapshot,
+            &SourceInventoryRequest {
+                source_root: "/Volumes/card".into(),
+                ..request.clone()
+            },
+        ));
+
         let stale_mount = SourceInventoryRequest {
-            source_root: "G:\\".into(),
+            source_root: if cfg!(windows) {
+                "G:\\".into()
+            } else {
+                "/Volumes/OTHER".into()
+            },
             ..request.clone()
         };
         assert!(!source_inventory_matches_current_device(
@@ -5008,6 +5158,260 @@ mod tests {
         .expect("receipt");
         assert!(receipt.contains("session_only") || receipt.contains("unresolved"));
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    #[ignore = "requires disposable exFAT and APFS image roots supplied by the macOS filesystem script"]
+    fn mac_exfat_source_completes_on_apfs_destination() {
+        // Compile the full integration body on every host, but execute only
+        // against the explicitly supplied native Mac filesystem fixtures.
+        assert_eq!(
+            std::env::consts::OS,
+            "macos",
+            "native macOS fixtures required"
+        );
+
+        let image_root = |variable: &str, expected_filesystem: &str| {
+            let root = PathBuf::from(std::env::var_os(variable).expect(variable))
+                .canonicalize()
+                .expect("existing disposable image root");
+            assert!(root.is_dir(), "image root must be an existing directory");
+            let output = std::process::Command::new("/usr/sbin/diskutil")
+                .args(["info", "-plist"])
+                .arg(&root)
+                .output()
+                .expect("read-only filesystem inspection");
+            assert!(
+                output.status.success(),
+                "diskutil filesystem inspection failed"
+            );
+            let properties = plist::Value::from_reader(std::io::Cursor::new(output.stdout))
+                .expect("diskutil property list");
+            let filesystem = properties
+                .as_dictionary()
+                .and_then(|dictionary| dictionary.get("FilesystemType"))
+                .and_then(plist::Value::as_string);
+            assert_eq!(filesystem, Some(expected_filesystem));
+            root
+        };
+        let exfat_root = image_root("MEDIA_INGEST_TEST_EXFAT_ROOT", "exfat");
+        let apfs_root = image_root("MEDIA_INGEST_TEST_APFS_ROOT", "apfs");
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_ne!(
+                std::fs::metadata(&exfat_root)
+                    .expect("exFAT metadata")
+                    .dev(),
+                std::fs::metadata(&apfs_root).expect("APFS metadata").dev(),
+                "source and destination must use distinct mounted filesystems"
+            );
+        }
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let owned_name = format!("mit-cross-filesystem-{operation_id}");
+        let source = exfat_root.join(&owned_name);
+        let destination_workspace = apfs_root.join(&owned_name);
+        std::fs::create_dir(&source).expect("exclusive owned source directory");
+        std::fs::create_dir(&destination_workspace).expect("exclusive owned destination directory");
+        std::fs::create_dir(source.join("DCIM")).expect("owned source fixture directory");
+        let destination = destination_workspace.join("destination");
+        let database = destination_workspace.join("store.sqlite3");
+        let fixtures = [
+            ("DCIM/clip.mov", vec![0x5a; 2_097_169]),
+            (
+                "DCIM/still.tif",
+                crate::ingest::tests::exif_hour_range_tiff("2026:10:13 13:42:00", 127),
+            ),
+        ];
+        let mut original_metadata = Vec::new();
+        for (relative, bytes) in &fixtures {
+            let path = source.join(relative);
+            std::fs::write(&path, bytes).expect("owned source fixture");
+            original_metadata.push(std::fs::metadata(path).expect("original source metadata"));
+        }
+        let expected_bytes: u64 = fixtures.iter().map(|(_, bytes)| bytes.len() as u64).sum();
+        let prepared = prepare_verified_ingest(
+            VerifiedIngestRequest {
+                operation_id: Some(operation_id.clone()),
+                source_root: source.to_string_lossy().into(),
+                destination_root: destination.to_string_lossy().into(),
+                source_medium_key: format!("session:cross-filesystem-{operation_id}"),
+                source_identity_confidence: IdentityConfidence::SessionOnly,
+                source_generation: 1,
+                max_workers: 2,
+                sort_mode: IngestSortMode::OriginalTree,
+                capture_time_basis: CaptureTimeBasis::default(),
+                interval_minutes: None,
+                custom_directory_fields: Vec::new(),
+                destination_depth_order: None,
+                auto_ingest_triggered: false,
+            },
+            operation_id.clone(),
+        )
+        .expect("production exFAT source plan");
+        assert_eq!(prepared.files.len(), fixtures.len());
+        assert!(
+            !destination.exists(),
+            "planning must not create a destination"
+        );
+        let source_identity = source_identity_for_request(&prepared.request);
+        let mut store = LocalStore::open(&database).expect("APFS local manifest");
+        store
+            .begin_ingest_run(
+                &operation_id,
+                &source_identity,
+                1,
+                &source.to_string_lossy(),
+                &destination.to_string_lossy(),
+            )
+            .expect("persist native run");
+        for file in &prepared.files {
+            assert!(store
+                .record_planned_file(
+                    &operation_id,
+                    &PlannedFileRecord {
+                        entry_id: file.entry_id.clone(),
+                        source_relative_path: file.source.relative_path.to_string_lossy().into(),
+                        destination_relative_path: file
+                            .destination_relative_path
+                            .to_string_lossy()
+                            .into(),
+                        byte_length: file.source.byte_length,
+                    },
+                )
+                .expect("persist frozen plan"));
+        }
+        assert!(store
+            .transition_ingest_run(&operation_id, IngestRunState::Copying, "plan persisted")
+            .expect("copying state"));
+        let completed = execute_prepared_ingest(
+            prepared,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
+        )
+        .expect("production exFAT-to-APFS verified ingest");
+        assert_eq!(completed.summary.copied_files, fixtures.len());
+        assert_eq!(completed.summary.copied_bytes, expected_bytes);
+        assert_eq!(
+            completed.summary.source_marker_status,
+            SourceMarkerStatus::Unavailable
+        );
+        assert!(crate::storage_marker::read_marker(&source)
+            .expect("marker before completion")
+            .is_none());
+        assert!(persist_verified_completion(
+            &mut store,
+            &operation_id,
+            &completed
+        ));
+        assert!(store
+            .has_completed_receipt_for_source(&operation_id, &source_identity.identity_key, 1)
+            .expect("exact completed receipt"));
+        assert_eq!(
+            store
+                .verified_file_count(&operation_id)
+                .expect("committed count"),
+            fixtures.len() as u64
+        );
+        assert_eq!(
+            store
+                .receipt_manifest_root(&operation_id)
+                .expect("sealed root"),
+            Some(completed.manifest_root_blake3.clone())
+        );
+        drop(store);
+
+        // The production command writes the optional marker only after SQLite
+        // completion. Exercise both creation and atomic record upgrade on exFAT.
+        assert_eq!(source_marker_status(&source), SourceMarkerStatus::Created);
+        assert_eq!(
+            source_marker_status_with_content_witness(&source, &completed.manifest_root_blake3),
+            SourceMarkerStatus::Recognized
+        );
+        let marker = crate::storage_marker::read_record(&source)
+            .expect("read exFAT marker")
+            .expect("created exFAT marker");
+        assert_eq!(
+            marker.content_fingerprint.as_deref(),
+            Some(completed.manifest_root_blake3.as_str())
+        );
+        let receipt: IngestReceipt = serde_json::from_slice(
+            &std::fs::read(
+                destination
+                    .join(".media-ingest-receipts")
+                    .join(&completed.summary.receipt_name),
+            )
+            .expect("published APFS receipt"),
+        )
+        .expect("versioned receipt");
+        assert_eq!(receipt.source_medium_key, source_identity.identity_key);
+        assert_eq!(receipt.source_generation, 1);
+        assert_eq!(
+            receipt.manifest_root_blake3,
+            manifest_root(&completed.copies)
+        );
+        assert_eq!(receipt.files.len(), fixtures.len());
+        for ((relative, bytes), before) in fixtures.iter().zip(&original_metadata) {
+            let source_path = source.join(relative);
+            let copy = completed
+                .copies
+                .iter()
+                .find(|copy| copy.source_relative_path == Path::new(relative))
+                .expect("exact frozen source entry");
+            let source_readback = std::fs::read(&source_path).expect("fresh exFAT source read");
+            let final_readback = std::fs::read(&copy.final_path).expect("fresh APFS final read");
+            assert_eq!(&source_readback, bytes);
+            assert_eq!(&final_readback, bytes);
+            let independent_digest = blake3::hash(&source_readback).to_hex().to_string();
+            assert_eq!(
+                independent_digest,
+                blake3::hash(&final_readback).to_hex().to_string()
+            );
+            assert_eq!(copy.digest_hex, independent_digest);
+            let receipt_file = receipt
+                .files
+                .iter()
+                .find(|file| file.relative_path == *relative)
+                .expect("receipt has the independently verified file");
+            assert_eq!(receipt_file.blake3, independent_digest);
+            assert_eq!(receipt_file.bytes, bytes.len() as u64);
+            let after = std::fs::metadata(source_path).expect("source preserved metadata");
+            assert_eq!(after.len(), before.len());
+            assert_eq!(
+                after.modified().expect("source mtime"),
+                before.modified().expect("original mtime")
+            );
+        }
+        assert_eq!(
+            enumerate_regular_files(&source)
+                .expect("source media preserved")
+                .len(),
+            fixtures.len()
+        );
+        let reopened = LocalStore::open(&database).expect("reopen durable manifest");
+        let history = reopened.recent_ingest_runs(1).expect("persisted history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].run_id, operation_id);
+        assert_eq!(history[0].state, "completed");
+        assert!(history[0].receipt_available);
+        assert_eq!(history[0].verified_file_count, fixtures.len() as u64);
+        assert_eq!(history[0].verified_bytes, expected_bytes);
+        drop(reopened);
+
+        // Remove only the freshly created UUID subdirectories, never supplied
+        // image roots or sibling content. Validate ownership before recursion.
+        assert_eq!(
+            source.canonicalize().expect("owned source path"),
+            exfat_root.join(&owned_name)
+        );
+        assert_eq!(
+            destination_workspace
+                .canonicalize()
+                .expect("owned destination path"),
+            apfs_root.join(&owned_name)
+        );
+        std::fs::remove_dir_all(&source).expect("cleanup owned exFAT fixture");
+        std::fs::remove_dir_all(&destination_workspace).expect("cleanup owned APFS fixture");
     }
 
     #[test]

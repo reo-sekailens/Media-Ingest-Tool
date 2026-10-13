@@ -1,6 +1,6 @@
 # TASK011 — Packaging, release, and supported-platform contract
 
-- **Status:** in progress — five-target automation, hosted Quality and nightly package publication are verified. Version-tag publication, signing/notarization, clean-machine install/start, SBOM, audits, and hardware-certified runtime support remain pending.
+- **Status:** in progress — five-target automation, hosted Quality and nightly package publication are verified. Intel/ARM Mac ad-hoc DMGs pass native install-copy/startup on 15/26. Version-tag publication, Developer ID/notarization, download quarantine/privacy, oldest runtime, SBOM, audits, and hardware-certified support remain pending.
 - **Depends on:** TASK001, TASK009, TASK010
 
 ## Objective
@@ -27,6 +27,40 @@ Ship reproducible native desktop artifacts and publish an honest support contrac
 - Release notes disclose any `partial` or `blocked` certification row.
 
 ## Verification evidence
+
+### 2026-10-13 ad-hoc manual installation
+
+The user requires Intel and Apple Silicon DMGs without an Apple Developer
+account. Developer ID signing/notarization are optional future distribution
+work, not required for this requested manual-install route. The macOS config
+uses minimum 13.3, hardened runtime and ad-hoc identity; Info.plist includes five
+accurate privacy descriptions. [Installation guidance](../../docs/macos-installation.md)
+documents checksum/architecture choice, Applications copy, per-app Open Anyway,
+Files & Folders and Apple Silicon laptop accessory approval.
+
+Quality covers macOS 15/26 on both native architectures, with core/filesystem
+checks, debug-only separate-ID WKWebView automation and independent shipping
+DMG verification. Packaging requires valid ad-hoc signatures before/after copy,
+matching plist/privacy/icon, native Mach-O architecture, bounded deployment
+target, system/bundled dependencies and fresh-profile LaunchServices startup.
+[Candidate run 38349630929](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38349630929)
+at `9e4c4fa` passes all four production DMG gates on native Intel/ARM macOS 15/26.
+All downloaded DMGs independently match their manifests, SHA256SUMS, validation
+reports and source commit. Matching Mac15-built installers and original metadata
+are saved under ignored `output/macos-compatibility/9e4c4fa`.
+[Final Quality run 38351288268](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268)
+passes all 16 software/UI jobs at `0984bc7`. Only the test adapter/contracts/docs
+differ from the verified installers; production inputs are unchanged. The test
+driver is not shipped. No versioned release is issued by the source integration.
+
+See [compatibility coverage](../../docs/macos-compatibility.md),
+[package gate](../../docs/macos-package-validation.md) and
+[native UI gate](../../docs/macos-ui-validation.md). Download quarantine/TCC,
+macOS 13.3 actual runtime, physical hardware, sleep/wake and privileged formatting
+remain explicit acceptance gaps. All working changes are integrated into `main`
+at the user's request, matching the retained `5e2e75f` validation snapshot except
+for integration documentation. Existing nightly automation continues to select
+the default-branch source on its normal schedule.
 
 ### 2026-10-10 nightly and release automation
 
@@ -77,6 +111,20 @@ The release is published and marked prerelease. A version-tag release was not
 issued; its metadata safeguards and workflow syntax/trigger configuration are
 verified locally. This completes the requested automation work, while TASK011
 remains open for signing, runtime installation, SBOM/audits and certification.
+
+### 2026-10-09 operational review
+
+Quality and installer workflows now read `.node-version`, activate the
+`rust-toolchain.toml` policy, use locked Cargo operations, and limit job duration
+and superseded runs. Quality uses Ubuntu 24.04, macOS 15, and Windows Server
+2022; installer builds use macOS 15 Intel/Apple Silicon runners after the
+macOS 13 runner retirement. These are build environments, not newly certified
+runtime support. DMG uploads include streamed SHA-256 checksums and a JSON
+manifest with source commit, target/build architecture, and toolchain policy.
+Local script fixtures check known hashes, nested/spaced names, `.app` exclusion,
+and missing-artifact/provenance rejection. Syntax, YAML parsing, and scoped
+formatting/lint pass. Hosted CI, artifact generation, signing/notarization,
+dependency audits, SBOM, and clean-machine install remain unverified.
 
 - Native CI logs and artifact hashes for every supported OS/architecture pair.
 - Install/start/uninstall smoke-test records from clean machines or clean user profiles.

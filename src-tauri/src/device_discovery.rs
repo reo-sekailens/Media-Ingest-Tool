@@ -825,8 +825,8 @@ mod platform {
 
     /// Enumerate only mounted, external/removable volumes. `diskutil -plist`
     /// emits a machine-readable property list, so no localized terminal text
-    /// is interpreted. The snapshot worker reconciles this native view every
-    /// second; event-driven Disk Arbitration remains required for certification.
+    /// is interpreted. Disk Arbitration callbacks request fresh snapshots;
+    /// the watcher also reconciles periodically as a missed-event fallback.
     pub fn enumerate_removable_volumes() -> Vec<DiscoveredVolume> {
         let output = match Command::new(DISKUTIL).args(["list", "-plist"]).output() {
             Ok(output) => output,
@@ -891,7 +891,17 @@ mod platform {
         }
         let identifier = entry.get("DeviceIdentifier")?.as_string()?;
         let info = disk_info(identifier)?;
-        if !info.removable || info.internal || !info.writable || !Path::new(&mount).is_dir() {
+        macos_volume_from_info(identifier, mount, info)
+    }
+
+    fn macos_volume_from_info(
+        identifier: &str,
+        mount: String,
+        info: DiskInfo,
+    ) -> Option<DiscoveredVolume> {
+        // `list` and `info` are separate snapshots. Never associate an old
+        // list entry with a device that moved or remounted while querying it.
+        if !info.matches_mounted_source(identifier, &mount) || !Path::new(&mount).is_absolute() {
             return None;
         }
         let mount_path = Path::new(&mount);
@@ -907,16 +917,26 @@ mod platform {
             total_space(mount_path).ok().or(info.capacity_bytes),
             available_space(mount_path).ok(),
         );
-        volume.marker_token = match crate::storage_marker::read_marker(mount_path) {
-            Ok(marker) => marker,
-            Err(error) => {
-                log::debug!(
-                    target: "media_ingest::macos::discovery",
-                    "managed-card marker could not be read (error kind: {:?})",
-                    error.kind()
-                );
-                None
+        // Writability is independent of source readability: locked SD cards
+        // are valid input. Check actual root-directory access without creating
+        // a file; scanning/copying still checks each source entry independently.
+        let directory_access = std::fs::read_dir(mount_path)
+            .and_then(|mut entries| entries.next().transpose().map(|_| ()));
+        (volume.state, volume.error_code) = source_read_state(directory_access);
+        volume.marker_token = if volume.state == DiscoveryState::Ready {
+            match crate::storage_marker::read_marker(mount_path) {
+                Ok(marker) => marker,
+                Err(error) => {
+                    log::debug!(
+                        target: "media_ingest::macos::discovery",
+                        "managed-card marker could not be read (error kind: {:?})",
+                        error.kind()
+                    );
+                    None
+                }
             }
+        } else {
+            None
         };
         volume.reader_topology = Some(ReaderTopology {
             vendor: info.vendor,
@@ -930,16 +950,40 @@ mod platform {
         Some(volume)
     }
 
+    fn source_read_state(access: std::io::Result<()>) -> (DiscoveryState, Option<String>) {
+        match access {
+            Ok(()) => (DiscoveryState::Ready, None),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => (
+                DiscoveryState::PermissionDenied,
+                Some("source_permission_denied".into()),
+            ),
+            Err(_) => (
+                DiscoveryState::Unavailable,
+                Some("source_unavailable".into()),
+            ),
+        }
+    }
+
     struct DiskInfo {
+        identifier: String,
+        mount_point: Option<String>,
         name: Option<String>,
         filesystem: Option<String>,
         volume_uuid: Option<String>,
         capacity_bytes: Option<u64>,
         removable: bool,
         internal: bool,
-        writable: bool,
         vendor: Option<String>,
         model: Option<String>,
+    }
+
+    impl DiskInfo {
+        fn matches_mounted_source(&self, identifier: &str, mount: &str) -> bool {
+            self.identifier == identifier
+                && self.mount_point.as_deref() == Some(mount)
+                && self.removable
+                && !self.internal
+        }
     }
 
     fn disk_info(identifier: &str) -> Option<DiskInfo> {
@@ -984,6 +1028,8 @@ mod platform {
     fn disk_info_from_plist(dictionary: &plist::Dictionary) -> Option<DiskInfo> {
         let capacity_bytes = integer(dictionary, "TotalSize")?;
         Some(DiskInfo {
+            identifier: string(dictionary, "DeviceIdentifier")?,
+            mount_point: string(dictionary, "MountPoint"),
             name: string(dictionary, "VolumeName"),
             filesystem: string(dictionary, "FilesystemType"),
             volume_uuid: string(dictionary, "VolumeUUID"),
@@ -992,18 +1038,21 @@ mod platform {
             // `RemovableMediaOrExternalDevice`. Preserve the older/component
             // spellings as defensive compatibility aliases. An SD card behind
             // a USB reader is normally a mounted partition under `Partitions`,
-            // not a whole-disk entry. Explicitly virtual disks never qualify.
+            // not a whole-disk entry. Real runner evidence shows mounted APFS
+            // images can omit VirtualOrPhysical and still report removable and
+            // ejectable; their explicit Disk Image protocol must also exclude
+            // them. Read-only physical cards remain valid source media.
             removable: (boolean(dictionary, "RemovableMediaOrExternalDevice")
                 || boolean(dictionary, "RemovableMediaOrExternal")
                 || boolean(dictionary, "RemovableMedia")
                 || boolean(dictionary, "Ejectable"))
                 && !string(dictionary, "VirtualOrPhysical")
-                    .is_some_and(|kind| kind.eq_ignore_ascii_case("virtual")),
-            internal: boolean(dictionary, "Internal"),
-            // A missing writable field is not evidence that source files are
-            // readable. Refuse it rather than relying on a negated, absent
-            // `ReadOnlyVolume` field.
-            writable: boolean(dictionary, "WritableVolume"),
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("virtual"))
+                && !string(dictionary, "BusProtocol")
+                    .is_some_and(|protocol| protocol.eq_ignore_ascii_case("Disk Image")),
+            // Missing external/internal evidence must never default to an
+            // external device eligible for source or safe-eject selection.
+            internal: dictionary.get("Internal")?.as_boolean()?,
             vendor: string(dictionary, "DeviceVendor"),
             model: string(dictionary, "MediaName").or_else(|| string(dictionary, "DeviceModel")),
         })
@@ -1075,6 +1124,8 @@ mod platform {
             let mut value = Value::from_reader_xml(
                 br#"<?xml version="1.0"?><plist version="1.0"><dict>
                     <key>TotalSize</key><integer>1024</integer>
+                    <key>DeviceIdentifier</key><string>disk4s1</string>
+                    <key>MountPoint</key><string>/Volumes/CAMERA</string>
                     <key>RemovableMediaOrExternalDevice</key><true/>
                     <key>Internal</key><false/><key>WritableVolume</key><true/>
                     <key>VolumeUUID</key><string>F00D</string>
@@ -1087,10 +1138,14 @@ mod platform {
             .expect("fixture dictionary");
             let info = disk_info_from_plist(&value).expect("required capacity");
             assert_eq!(info.capacity_bytes, Some(1024));
+            assert_eq!(info.identifier, "disk4s1");
+            assert_eq!(info.mount_point.as_deref(), Some("/Volumes/CAMERA"));
             assert!(info.removable);
             assert!(!info.internal);
-            assert!(info.writable);
             assert_eq!(info.filesystem.as_deref(), Some("exfat"));
+            assert!(info.matches_mounted_source("disk4s1", "/Volumes/CAMERA"));
+            assert!(!info.matches_mounted_source("disk5s1", "/Volumes/CAMERA"));
+            assert!(!info.matches_mounted_source("disk4s1", "/Volumes/OLD-CAMERA"));
 
             value.remove("RemovableMediaOrExternalDevice");
             value.insert("RemovableMedia".into(), Value::Boolean(true));
@@ -1109,21 +1164,137 @@ mod platform {
 
             value.remove("VirtualOrPhysical");
             value.insert("WritableVolume".into(), Value::Boolean(false));
-            assert!(
-                !disk_info_from_plist(&value)
-                    .expect("read-only fixture still has complete plist")
-                    .writable
-            );
+            assert!(disk_info_from_plist(&value)
+                .expect("read-only fixture still has complete plist")
+                .matches_mounted_source("disk4s1", "/Volumes/CAMERA"));
 
             value.remove("WritableVolume");
-            assert!(
-                !disk_info_from_plist(&value)
-                    .expect("missing writable evidence still parses")
-                    .writable
-            );
+            assert!(disk_info_from_plist(&value)
+                .expect("missing writable evidence still parses")
+                .matches_mounted_source("disk4s1", "/Volumes/CAMERA"));
 
             value.remove("TotalSize");
             assert!(disk_info_from_plist(&value).is_none());
+            value.insert("TotalSize".into(), Value::Integer(1024_u64.into()));
+            value.remove("Internal");
+            assert!(disk_info_from_plist(&value).is_none());
+            value.insert("Internal".into(), Value::Boolean(false));
+            value.remove("DeviceIdentifier");
+            assert!(disk_info_from_plist(&value).is_none());
+        }
+
+        #[test]
+        fn disk_images_with_missing_virtual_kind_are_not_physical_read_only_cards() {
+            let mut dictionary = Value::from_reader_xml(
+                br#"<?xml version="1.0"?><plist version="1.0"><dict>
+                    <key>TotalSize</key><integer>1024</integer>
+                    <key>DeviceIdentifier</key><string>disk4s1</string>
+                    <key>MountPoint</key><string>/Volumes/TEST</string>
+                    <key>RemovableMediaOrExternalDevice</key><true/>
+                    <key>Ejectable</key><true/><key>Internal</key><false/>
+                    <key>WritableVolume</key><false/>
+                    <key>BusProtocol</key><string>Disk Image</string>
+                    <key>FilesystemType</key><string>apfs</string>
+                </dict></plist>"#
+                    .as_slice(),
+            )
+            .expect("runner-shaped disk image fixture")
+            .into_dictionary()
+            .expect("fixture dictionary");
+            let image = disk_info_from_plist(&dictionary).expect("complete mounted image info");
+            assert!(!image.removable);
+            assert!(!image.matches_mounted_source("disk4s1", "/Volumes/TEST"));
+
+            dictionary.insert("BusProtocol".into(), Value::String("USB".into()));
+            let card = disk_info_from_plist(&dictionary).expect("read-only physical source info");
+            assert!(card.removable);
+            assert!(card.matches_mounted_source("disk4s1", "/Volumes/TEST"));
+        }
+
+        #[test]
+        fn read_only_volume_projects_a_readable_source_without_creating_a_marker() {
+            let root =
+                std::env::temp_dir().join(format!("mit-read-only-source-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&root).expect("source fixture root");
+            let source = root.join("clip.mov");
+            std::fs::write(&source, b"camera bytes").expect("source fixture bytes");
+            let mount = root.to_str().expect("fixture UTF-8 path").to_owned();
+            let mut dictionary = plist::Dictionary::new();
+            dictionary.insert("DeviceIdentifier".into(), Value::String("disk4s1".into()));
+            dictionary.insert("MountPoint".into(), Value::String(mount.clone()));
+            dictionary.insert("TotalSize".into(), Value::Integer(1024_u64.into()));
+            dictionary.insert("Internal".into(), Value::Boolean(false));
+            dictionary.insert(
+                "RemovableMediaOrExternalDevice".into(),
+                Value::Boolean(true),
+            );
+            dictionary.insert("WritableVolume".into(), Value::Boolean(false));
+            let info = disk_info_from_plist(&dictionary).expect("read-only volume metadata");
+            let volume = macos_volume_from_info("disk4s1", mount.clone(), info)
+                .expect("readable read-only volume remains discoverable");
+            assert_eq!(volume.state, DiscoveryState::Ready);
+            assert_eq!(volume.mount_locations, vec![mount.clone()]);
+            assert_eq!(volume.marker_token, None);
+            assert_eq!(volume.error_code, None);
+            assert_eq!(
+                std::fs::read(&source).expect("unchanged source"),
+                b"camera bytes"
+            );
+            assert_eq!(
+                std::fs::read_dir(&root).expect("fixture listing").count(),
+                1
+            );
+            std::fs::remove_dir_all(&root).expect("remove only task-owned fixture");
+            let info = disk_info_from_plist(&dictionary).expect("last observed volume metadata");
+            let removed = macos_volume_from_info("disk4s1", mount, info)
+                .expect("removed mount retains a non-ingestable observation");
+            assert_eq!(removed.state, DiscoveryState::Unavailable);
+            assert_eq!(removed.error_code.as_deref(), Some("source_unavailable"));
+            assert_eq!(removed.marker_token, None);
+        }
+
+        #[test]
+        fn actual_read_access_failure_does_not_become_an_available_source() {
+            let (state, error) = source_read_state(Err(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied,
+            )));
+            assert_eq!(state, DiscoveryState::PermissionDenied);
+            assert_eq!(error.as_deref(), Some("source_permission_denied"));
+            let (state, error) =
+                source_read_state(Err(std::io::Error::from(std::io::ErrorKind::NotFound)));
+            assert_eq!(state, DiscoveryState::Unavailable);
+            assert_eq!(error.as_deref(), Some("source_unavailable"));
+        }
+
+        #[test]
+        fn native_diskutil_system_snapshot_uses_the_expected_plist_schema() {
+            // Read-only runner validation of the installed macOS utility.
+            // The system volume cannot become an ingest source in this test.
+            let output = Command::new(DISKUTIL)
+                .args(["info", "-plist", "/"])
+                .output()
+                .expect("native diskutil info");
+            assert!(output.status.success());
+            let dictionary = Value::from_reader_xml(output.stdout.as_slice())
+                .expect("native XML plist")
+                .into_dictionary()
+                .expect("native info dictionary");
+            let info = disk_info_from_plist(&dictionary).expect("native required schema");
+            assert!(info.identifier.starts_with("disk"));
+            assert_eq!(info.mount_point.as_deref(), Some("/"));
+            assert!(info.internal, "system volume stays excluded");
+
+            let output = Command::new(DISKUTIL)
+                .args(["list", "-plist"])
+                .output()
+                .expect("native diskutil list");
+            assert!(output.status.success());
+            let root =
+                Value::from_reader_xml(output.stdout.as_slice()).expect("native list XML plist");
+            assert!(disk_entries(&root).any(|entry| entry
+                .get("DeviceIdentifier")
+                .and_then(Value::as_string)
+                .is_some()));
         }
     }
 }

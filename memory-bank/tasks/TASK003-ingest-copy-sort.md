@@ -303,6 +303,11 @@ certification are not established by runner tests or browser fixtures.
 
 ## Known constraints and follow-up decisions
 
+- 2026-10-09 review: destination space preflight can inspect the nearest
+  existing parent, but root validation currently rejects a destination with
+  multiple missing parent levels. Unify validated directory creation with
+  preflight before advertising arbitrary nested new roots as supported.
+
 - Camera body serial metadata can be absent, incorrect, or editable. The product can provide stable, explicit identity evidence and prevent same-model conflation; it cannot manufacture a trustworthy immutable camera ID from model/filename alone.
 - Filesystem timestamps and timestamp semantics vary. Any fallback must be visibly lower confidence and recorded.
 - Network/cloud destinations may not provide local rename, sync, or capacity semantics. They require a separate destination adapter/capability task; this task targets filesystem paths mounted on the host.

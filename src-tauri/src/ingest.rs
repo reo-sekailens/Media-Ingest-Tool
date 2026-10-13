@@ -258,6 +258,7 @@ pub enum IngestError {
     Cancelled,
     InvalidPath,
     DestinationExists,
+    AtomicPublicationUnsupported,
     SourceChanged,
     UnsafeSourceEntry,
     VerificationFailed,
@@ -309,11 +310,20 @@ pub fn validate_ingest_roots(
     let destination = if destination_root.exists() {
         destination_root.canonicalize()?
     } else {
-        let parent = destination_root.parent().ok_or(IngestError::InvalidPath)?;
-        let name = destination_root
-            .file_name()
-            .ok_or(IngestError::InvalidPath)?;
-        parent.canonicalize()?.join(name)
+        let existing = nearest_existing_ancestor(destination_root)?;
+        if !existing.is_dir() {
+            return Err(IngestError::InvalidPath);
+        }
+        let suffix = destination_root
+            .strip_prefix(existing)
+            .map_err(|_| IngestError::InvalidPath)?;
+        if suffix
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Err(IngestError::InvalidPath);
+        }
+        existing.canonicalize()?.join(suffix)
     };
     if destination == source || destination.starts_with(&source) || source.starts_with(&destination)
     {
@@ -373,12 +383,14 @@ fn enumerate_directory(
             .strip_prefix(root)
             .map_err(|_| IngestError::InvalidPath)?
             .to_path_buf();
-        // Windows creates this protected root directory on otherwise clean
-        // removable media. It is host metadata, never camera media, and may
-        // be unreadable to a normal desktop process. Do not let it make a
-        // clean-card inventory fail; every other inaccessible entry remains
-        // an explicit scan error.
-        if relative_path == Path::new("System Volume Information") {
+        // OS-managed root directories are not camera media. They can be
+        // inaccessible or change while the card is mounted. Match only exact
+        // root names; ordinary dotfiles and identically named nested media
+        // remain part of the inventory and managed-content witness.
+        if matches!(
+            relative_path.to_str(),
+            Some("System Volume Information" | ".fseventsd" | ".Spotlight-V100" | ".Trashes")
+        ) {
             continue;
         }
         let metadata = fs::symlink_metadata(entry.path())?;
@@ -500,7 +512,11 @@ pub fn verify_existing_copy_with_progress(
     if !before.is_file() || before.len() != source.byte_length {
         return Err(IngestError::SourceChanged);
     }
-    if !destination_metadata_matches(&final_path, source.byte_length)? {
+    let destination_before = fs::symlink_metadata(&final_path)?;
+    if !destination_before.is_file()
+        || is_prohibited_source_entry(&destination_before)
+        || destination_before.len() != source.byte_length
+    {
         return Err(IngestError::VerificationFailed);
     }
     let source_digest = hash_file(&source_path, cancel)?;
@@ -524,6 +540,15 @@ pub fn verify_existing_copy_with_progress(
         return Err(IngestError::SourceChanged);
     }
     if source_digest != destination_digest {
+        return Err(IngestError::VerificationFailed);
+    }
+    // The final path can change after its last readback chunk. Recovery must
+    // reject that changed file rather than seal the digest of earlier bytes.
+    let destination_after = fs::symlink_metadata(&final_path)?;
+    if !destination_after.is_file()
+        || is_prohibited_source_entry(&destination_after)
+        || source_metadata_changed(&destination_before, &destination_after)
+    {
         return Err(IngestError::VerificationFailed);
     }
     Ok(VerifiedCopy {
@@ -590,7 +615,7 @@ fn verified_copy_to_with_progress(
                 let _ = fs::remove_file(&temporary_path);
                 return Err(IngestError::SourceChanged);
             }
-            fs::rename(&temporary_path, &final_path)?;
+            publish_verified_file(&temporary_path, &final_path)?;
             // The independent digest was computed on the closed temporary
             // file. Reopen and flush the published path before checking it:
             // the same-directory rename is atomic on the supported local
@@ -622,6 +647,49 @@ fn partial_path(parent: &Path, entry_id: &str) -> PathBuf {
         ".ingest-{}.partial",
         blake3::hash(entry_id.as_bytes()).to_hex()
     ))
+}
+
+/// macOS rename() replaces an existing destination. The existence check at
+/// planning time cannot prevent another process (or a case/Unicode alias) from
+/// creating that destination before publication. RENAME_EXCL makes the refusal
+/// atomic and preserves the verified partial on a collision. Unsupported
+/// filesystems return an error; never fall back to a replacing rename.
+#[cfg(target_os = "macos")]
+fn publish_verified_file(temporary: &Path, destination: &Path) -> Result<(), IngestError> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_uint};
+    use std::os::unix::ffi::OsStrExt;
+
+    extern "C" {
+        fn renamex_np(from: *const c_char, to: *const c_char, flags: c_uint) -> c_int;
+    }
+    // Apple's <sys/stdio.h>; available since macOS 10.12.
+    const RENAME_EXCL: c_uint = 0x0000_0004;
+    let from =
+        CString::new(temporary.as_os_str().as_bytes()).map_err(|_| IngestError::InvalidPath)?;
+    let to =
+        CString::new(destination.as_os_str().as_bytes()).map_err(|_| IngestError::InvalidPath)?;
+    // SAFETY: both NUL-terminated path buffers outlive this synchronous call;
+    // the signature and flag match Apple's header on Intel and ARM64.
+    if unsafe { renamex_np(from.as_ptr(), to.as_ptr(), RENAME_EXCL) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        Err(IngestError::DestinationExists)
+    } else if error.raw_os_error() == Some(45) {
+        // Darwin ENOTSUP: observed on exFAT for RENAME_EXCL. Do not
+        // reinterpret unrelated I/O errors or fall back to overwriting.
+        Err(IngestError::AtomicPublicationUnsupported)
+    } else {
+        Err(IngestError::Io(error))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn publish_verified_file(temporary: &Path, destination: &Path) -> Result<(), IngestError> {
+    fs::rename(temporary, destination)?;
+    Ok(())
 }
 
 /// Removes only the deterministic checkpoint owned by the frozen plan entry.
@@ -868,7 +936,7 @@ pub fn write_receipt(path: &Path, receipt: &IngestReceipt) -> Result<(), IngestE
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(temporary, path)?;
+    publish_verified_file(&temporary, path)?;
     Ok(())
 }
 
@@ -1568,6 +1636,103 @@ pub(crate) mod tests {
         worker.join().expect("worker");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_destination_primitives_report_native_support() {
+        let root = std::env::temp_dir().join(format!("ingest-primitives-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("probe directory");
+        let partial = root.join("verified.partial");
+        let final_path = root.join("published.bin");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
+            .expect("probe file");
+        file.write_all(b"native filesystem probe")
+            .expect("probe bytes");
+        let flush = file.sync_all();
+        println!("native File::sync_all: {flush:?}");
+        drop(file);
+        let publication = publish_verified_file(&partial, &final_path);
+        println!("native exclusive publication: {publication:?}");
+        flush.expect("native File::sync_all stage");
+        publication.expect("native exclusive publication stage");
+        assert_eq!(
+            fs::read(&final_path).expect("probe readback"),
+            b"native filesystem probe"
+        );
+        fs::remove_dir_all(root).expect("probe cleanup");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the disposable exFAT image created by test-macos-filesystems.sh"]
+    fn mac_exfat_destination_preserves_data_when_publication_is_unsupported() {
+        let volume = std::env::var_os("MEDIA_INGEST_TEST_EXFAT_ROOT")
+            .map(PathBuf::from)
+            .expect("explicit disposable exFAT root");
+        assert!(volume.is_absolute() && volume.is_dir());
+        let root = volume.join(format!("ingest-exfat-{}", Uuid::new_v4()));
+        let source_root = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_root).expect("source");
+        fs::write(source_root.join("clip.mov"), b"camera bytes").expect("source bytes");
+        let source = enumerate_regular_files(&source_root)
+            .expect("plan")
+            .remove(0);
+        assert!(matches!(
+            verified_copy_to(
+                &source_root,
+                &source,
+                Path::new("clip.mov"),
+                "exfat-entry",
+                &destination,
+                &AtomicBool::new(false)
+            ),
+            Err(IngestError::AtomicPublicationUnsupported)
+        ));
+        assert_eq!(
+            fs::read(source_root.join("clip.mov")).expect("source retained"),
+            b"camera bytes"
+        );
+        assert_eq!(
+            fs::read(partial_path(&destination, "exfat-entry")).expect("verified partial retained"),
+            b"camera bytes"
+        );
+        assert!(!destination.join("clip.mov").exists());
+        let receipt = IngestReceipt {
+            schema_version: 1,
+            manifest_algorithm: MANIFEST_ALGORITHM.into(),
+            manifest_root_blake3: manifest_root(&[]),
+            source_medium_key: "test-only".into(),
+            source_identity_confidence: "unresolved".into(),
+            source_generation: 1,
+            files: vec![],
+        };
+        assert!(matches!(
+            write_receipt(&destination.join("receipt.json"), &receipt),
+            Err(IngestError::AtomicPublicationUnsupported)
+        ));
+        assert!(!destination.join("receipt.json").exists());
+        fs::write(destination.join("clip.mov"), b"other operator bytes").expect("competitor");
+        assert!(matches!(
+            verified_copy_to(
+                &source_root,
+                &source,
+                Path::new("clip.mov"),
+                "exfat-entry",
+                &destination,
+                &AtomicBool::new(false)
+            ),
+            Err(IngestError::DestinationExists)
+        ));
+        assert_eq!(
+            fs::read(destination.join("clip.mov")).expect("competitor retained"),
+            b"other operator bytes"
+        );
+        fs::remove_dir_all(root).expect("owned fixture cleanup");
+    }
+
     #[test]
     fn verified_copy_independently_hashes_and_commits() {
         let root = std::env::temp_dir().join(format!("ingest-test-{}", Uuid::new_v4()));
@@ -1667,6 +1832,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn recovery_rejects_a_destination_changed_during_readback() {
+        let root = std::env::temp_dir().join(format!("ingest-recovery-change-{}", Uuid::new_v4()));
+        let source_root = root.join("source");
+        let destination_root = root.join("destination");
+        fs::create_dir_all(&source_root).expect("source");
+        fs::write(source_root.join("clip.mov"), b"camera bytes").expect("fixture");
+        let source = enumerate_regular_files(&source_root)
+            .expect("plan")
+            .remove(0);
+        let initial = verified_copy_to(
+            &source_root,
+            &source,
+            &source.relative_path,
+            "entry-1",
+            &destination_root,
+            &AtomicBool::new(false),
+        )
+        .expect("initial copy");
+        let final_path = initial.final_path;
+        let progress: CopyProgressCallback = Arc::new(move |_| {
+            fs::write(&final_path, b"changed").expect("destination changed after readback chunk");
+        });
+        let recovered = verify_existing_copy_with_progress(
+            &source_root,
+            &source,
+            &source.relative_path,
+            "entry-1",
+            &destination_root,
+            &AtomicBool::new(false),
+            Some(VerificationProgress {
+                callback: progress,
+                file_index: 1,
+                total_files: 1,
+            }),
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+        assert!(matches!(recovered, Err(IngestError::VerificationFailed)));
+    }
+
+    #[test]
     fn cancelled_copy_keeps_an_entry_scoped_partial_until_explicit_recovery() {
         let root = std::env::temp_dir().join(format!("ingest-partial-{}", Uuid::new_v4()));
         let source_root = root.join("source");
@@ -1733,6 +1938,150 @@ pub(crate) mod tests {
         let plan = enumerate_regular_files(&root).expect("plan");
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].relative_path, PathBuf::from("clip.mov"));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn copy_accepts_nested_new_destinations_but_rejects_overlap_and_parent_traversal() {
+        let root =
+            std::env::temp_dir().join(format!("ingest-nested-destination-{}", Uuid::new_v4()));
+        let source_root = root.join("source");
+        fs::create_dir_all(&source_root).expect("source");
+        fs::write(source_root.join("clip.mov"), b"camera bytes").expect("source fixture");
+        let source = enumerate_regular_files(&source_root)
+            .expect("plan")
+            .remove(0);
+        let destination = root.join("new").join("nested").join("destination");
+        let copied = verified_copy(&source_root, &source, &destination, &AtomicBool::new(false))
+            .expect("nested new copy");
+        assert_eq!(
+            fs::read(copied.final_path).expect("readback"),
+            b"camera bytes"
+        );
+        assert!(matches!(
+            validate_ingest_roots(&source_root, &source_root.join("new/nested")),
+            Err(IngestError::InvalidPath)
+        ));
+        assert!(matches!(
+            validate_ingest_roots(&source_root, &root.join("missing/../source")),
+            Err(IngestError::InvalidPath)
+        ));
+        assert_eq!(
+            fs::read(source_root.join("clip.mov")).expect("source retained"),
+            b"camera bytes"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn inventory_excludes_mac_volume_metadata_but_keeps_nested_names_and_dotfiles() {
+        let root = std::env::temp_dir().join(format!("ingest-mac-metadata-{}", Uuid::new_v4()));
+        for name in [".fseventsd", ".Spotlight-V100", ".Trashes"] {
+            fs::create_dir_all(root.join(name)).expect("root metadata directory");
+            fs::write(root.join(name).join("host.dat"), b"host").expect("host metadata");
+            fs::create_dir_all(root.join("DCIM").join(name)).expect("nested camera directory");
+            fs::write(root.join("DCIM").join(name).join("clip.mov"), b"camera")
+                .expect("nested camera file");
+        }
+        fs::write(root.join(".camera-settings"), b"camera settings").expect("ordinary dotfile");
+        let plan = enumerate_regular_files(&root).expect("plan");
+        assert_eq!(plan.len(), 4);
+        assert!(plan
+            .iter()
+            .any(|file| file.relative_path == Path::new(".camera-settings")));
+        assert!(
+            plan.iter()
+                .filter(|file| file.relative_path.starts_with("DCIM"))
+                .count()
+                == 3
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_publication_preserves_a_competing_file_and_the_verified_partial() {
+        let root = std::env::temp_dir().join(format!("ingest-mac-race-{}", Uuid::new_v4()));
+        let source_root = root.join("source");
+        let destination_root = root.join("destination");
+        fs::create_dir_all(&source_root).expect("source");
+        fs::write(source_root.join("clip.mov"), b"camera bytes").expect("source file");
+        let source = enumerate_regular_files(&source_root)
+            .expect("plan")
+            .remove(0);
+        let final_path = destination_root.join("clip.mov");
+        let competitor_path = final_path.clone();
+        let progress: FileByteProgressCallback = Arc::new(move |stage, _| {
+            if stage == CopyProgressStage::Verifying {
+                fs::write(&competitor_path, b"other operator bytes")
+                    .expect("competing publication");
+            }
+        });
+        let result = verified_copy_to_with_progress(
+            &source_root,
+            &source,
+            Path::new("clip.mov"),
+            "race-entry",
+            &destination_root,
+            &AtomicBool::new(false),
+            Some(&progress),
+        );
+        assert!(matches!(result, Err(IngestError::DestinationExists)));
+        assert_eq!(
+            fs::read(final_path).expect("competitor retained"),
+            b"other operator bytes"
+        );
+        assert_eq!(
+            fs::read(partial_path(&destination_root, "race-entry")).expect("partial retained"),
+            b"camera bytes"
+        );
+        assert_eq!(
+            fs::read(source_root.join("clip.mov")).expect("source retained"),
+            b"camera bytes"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_publication_refuses_existing_receipts_and_dangling_symlinks() {
+        let root = std::env::temp_dir().join(format!("ingest-mac-publish-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("root");
+        let partial = root.join(".receipt.partial");
+        let receipt = root.join("receipt.json");
+        fs::write(&partial, b"new receipt").expect("partial");
+        fs::write(&receipt, b"old receipt").expect("existing receipt");
+        assert!(matches!(
+            publish_verified_file(&partial, &receipt),
+            Err(IngestError::DestinationExists)
+        ));
+        assert_eq!(
+            fs::read(&receipt).expect("receipt retained"),
+            b"old receipt"
+        );
+        fs::remove_file(&receipt).expect("remove fixture receipt");
+        // exFAT has no symlink support; that check belongs to the APFS runs.
+        if std::os::unix::fs::symlink(root.join("missing"), &receipt).is_ok() {
+            assert!(matches!(
+                publish_verified_file(&partial, &receipt),
+                Err(IngestError::DestinationExists)
+            ));
+            assert!(fs::symlink_metadata(&receipt)
+                .expect("symlink retained")
+                .file_type()
+                .is_symlink());
+            fs::remove_file(&receipt).expect("remove fixture symlink");
+        }
+        assert_eq!(
+            fs::read(&partial).expect("partial retained"),
+            b"new receipt"
+        );
+        publish_verified_file(&partial, &receipt).expect("normal publication");
+        assert_eq!(
+            fs::read(&receipt).expect("published receipt"),
+            b"new receipt"
+        );
+        assert!(!partial.exists());
         fs::remove_dir_all(root).expect("cleanup");
     }
 

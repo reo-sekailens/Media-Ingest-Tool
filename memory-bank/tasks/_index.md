@@ -7,7 +7,7 @@ Execute tasks according to the [delivery roadmap](ROADMAP.md), not numeric order
 | Task                                                        | Status      | Priority | Depends on                         | Outcome                                                                                             |
 | ----------------------------------------------------------- | ----------- | -------- | ---------------------------------- | --------------------------------------------------------------------------------------------------- |
 | [TASK001](TASK001-foundation.md)                            | in progress | P0       | —                                  | Tauri 2 + Rust + React + strict TypeScript + Tailwind foundation and typed trust boundary.          |
-| [TASK002](TASK002-device-discovery-identity.md)             | planned     | P0       | TASK001                            | Native Windows/macOS/Linux device graph, hotplug, details, and identity confidence.                 |
+| [TASK002](TASK002-device-discovery-identity.md)             | in progress | P0       | TASK001                            | Native Windows/macOS/Linux device graph, hotplug, details, and identity confidence.                 |
 | [TASK007](TASK007-local-store-profiles.md)                  | planned     | P0       | TASK001, TASK002                   | SQLite identities, per-card destinations, camera profiles, sessions, and receipts.                  |
 | [TASK003](TASK003-ingest-copy-sort.md)                      | planned     | P0       | TASK001, TASK002, TASK007          | Bounded concurrent copy, camera identity, metadata, time buckets, and collision-safe paths.         |
 | [TASK004](TASK004-verification-recovery.md)                 | in progress | P0       | TASK002, TASK003, TASK007          | Full BLAKE3 destination readback, durable manifest, resume, receipt, and format authorization.      |
@@ -16,7 +16,7 @@ Execute tasks according to the [delivery roadmap](ROADMAP.md), not numeric order
 | [TASK005](TASK005-safe-format.md)                           | planned     | P0       | TASK002, TASK004, TASK009          | Fail-closed OS-native quick format with remount/post-format validation.                             |
 | [TASK006](TASK006-sandisk-slot-mapping.md)                  | planned     | P1       | TASK002                            | Exact SanDisk Professional SD vs microSD slot mapping and calibration.                              |
 | [TASK012](TASK012-ingest-lifecycle-receipts.md)             | in progress | P1       | TASK002–TASK004, TASK007, TASK008  | Disconnect, cancel, crash, sleep/wake, safe eject, and operational receipts.                        |
-| [TASK010](TASK010-cross-platform-hardware-certification.md) | planned     | P0       | TASK002–TASK009, TASK012           | Cross-platform filesystems, real hardware, failure, and performance certification.                  |
+| [TASK010](TASK010-cross-platform-hardware-certification.md) | in progress | P0       | TASK002–TASK009, TASK012           | Cross-platform filesystems, real hardware, failure, and performance certification.                  |
 | [TASK011](TASK011-packaging-release-support.md)             | in progress | P1       | TASK001, TASK009, TASK010          | Signed/packageable artifacts and an exact supported-platform contract.                              |
 
 ## Dependency-safe batches

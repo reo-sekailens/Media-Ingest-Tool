@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>Media Ingest Tool reads camera cards, verifies copied media, and saves card settings when you request it.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>Media Ingest Tool copies and verifies media in the destination folder you select.</string>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>Media Ingest Tool copies and verifies media in the destination folder you select.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>Media Ingest Tool copies and verifies media in the destination folder you select.</string>
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>Media Ingest Tool copies and verifies media in the network destination folder you select.</string>
+</dict>
+</plist>

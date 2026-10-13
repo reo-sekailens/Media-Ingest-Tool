@@ -323,7 +323,10 @@ mod platform {
             return Err(SafeEjectError::DeviceNotEjectable);
         }
         let output = Command::new(DISKUTIL)
-            .args(["eject", "-plist"])
+            // The eject verb takes a device/mount argument; unlike list/info,
+            // it does not need property-list output. The OS exit status is the
+            // confirmation, so localized stdout is deliberately ignored.
+            .arg("eject")
             .arg(&canonical)
             .output()
             .map_err(|error| {

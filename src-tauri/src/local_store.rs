@@ -103,6 +103,20 @@ impl LocalStore {
         let connection = Connection::open(path)?;
         let store = Self { connection };
         store.migrate()?;
+        #[cfg(target_os = "macos")]
+        {
+            let journal: String =
+                store
+                    .connection
+                    .pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+            let synchronous: i64 =
+                store
+                    .connection
+                    .pragma_query_value(None, "synchronous", |row| row.get(0))?;
+            if journal != "wal" || synchronous != 2 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
         Ok(store)
     }
 
@@ -116,6 +130,19 @@ impl LocalStore {
     }
 
     fn migrate(&self) -> rusqlite::Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            // SQLite's FULL synchronous policy uses fsync unless fullfsync is
+            // enabled separately on macOS. Request Apple's F_FULLFSYNC for
+            // committed receipt/history state, then verify the active policy.
+            self.connection.pragma_update(None, "fullfsync", "ON")?;
+            let enabled: i64 = self
+                .connection
+                .pragma_query_value(None, "fullfsync", |row| row.get(0))?;
+            if enabled != 1 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
         self.connection.execute_batch(
             "
             PRAGMA foreign_keys = ON;
@@ -939,7 +966,7 @@ impl LocalStore {
             .query_row(
                 "SELECT
                     COUNT(*),
-                    SUM(CASE WHEN state = 'committed' THEN 1 ELSE 0 END),
+                    COALESCE(SUM(CASE WHEN state = 'committed' THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN state = 'committed' THEN byte_length ELSE 0 END), 0)
                  FROM ingest_file WHERE run_id = ?1",
                 params![run_id],
@@ -1037,7 +1064,7 @@ impl LocalStore {
             .query_row(
                 "SELECT
                     COUNT(*),
-                    SUM(CASE WHEN state = 'committed' THEN 1 ELSE 0 END),
+                    COALESCE(SUM(CASE WHEN state = 'committed' THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN state = 'committed' THEN byte_length ELSE 0 END), 0)
                  FROM ingest_file WHERE run_id = ?1",
                 params![run_id],
@@ -1220,6 +1247,33 @@ fn identity_strength_name(strength: IdentityStrength) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_file_store_uses_wal_full_synchronous_and_fullfsync_after_reopen() {
+        let root = std::env::temp_dir().join(format!("store-mac-sync-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("fixture directory");
+        let path = root.join("history.sqlite3");
+        for _ in 0..2 {
+            let store = LocalStore::open(&path).expect("open durable store");
+            let journal_mode: String = store
+                .connection
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .expect("journal mode");
+            let synchronous: i64 = store
+                .connection
+                .pragma_query_value(None, "synchronous", |row| row.get(0))
+                .expect("sync policy");
+            let fullfsync: i64 = store
+                .connection
+                .pragma_query_value(None, "fullfsync", |row| row.get(0))
+                .expect("fullfsync");
+            assert_eq!(journal_mode, "wal");
+            assert_eq!(synchronous, 2);
+            assert_eq!(fullfsync, 1);
+        }
+        std::fs::remove_dir_all(root).expect("fixture cleanup");
+    }
 
     fn identity(key: &str, strength: IdentityStrength) -> SourceIdentityRecord {
         SourceIdentityRecord {
@@ -1747,6 +1801,48 @@ mod tests {
             )
             .expect("state");
         assert_eq!(state, "copying");
+    }
+
+    #[test]
+    fn an_empty_plan_can_complete_with_a_zero_file_receipt() {
+        let mut store = LocalStore::in_memory().expect("store");
+        let source = identity("v1:empty-card", IdentityStrength::HardwareStrong);
+        store
+            .begin_ingest_run("empty-run", &source, 1, "/source", "/destination")
+            .expect("begin run");
+        assert!(store
+            .transition_ingest_run("empty-run", IngestRunState::Copying, "worker started")
+            .expect("copying"));
+        assert!(store
+            .commit_verified_completion("empty-run", &[], "blake3:test", "empty-root", 0, 0)
+            .expect("complete empty plan"));
+        let history = store.recent_ingest_runs(1).expect("history");
+        assert_eq!(history[0].state, "completed");
+        assert_eq!(history[0].verified_file_count, 0);
+        assert_eq!(history[0].verified_bytes, 0);
+        assert!(history[0].receipt_available);
+    }
+
+    #[test]
+    fn an_empty_plan_seal_requires_zero_expected_files_and_bytes() {
+        let mut store = LocalStore::in_memory().expect("store");
+        let source = identity("v1:empty-card", IdentityStrength::HardwareStrong);
+        store
+            .begin_ingest_run("empty-run", &source, 1, "/source", "/destination")
+            .expect("begin run");
+        assert!(store
+            .transition_ingest_run("empty-run", IngestRunState::Copying, "worker started")
+            .expect("copying"));
+        assert!(!store
+            .seal_ingest_receipt("empty-run", "blake3:test", "empty-root", 1, 0)
+            .expect("nonempty count rejected"));
+        assert!(!store
+            .seal_ingest_receipt("empty-run", "blake3:test", "empty-root", 0, 1)
+            .expect("nonzero bytes rejected"));
+        assert!(store
+            .seal_ingest_receipt("empty-run", "blake3:test", "empty-root", 0, 0)
+            .expect("seal empty plan"));
+        assert_eq!(store.receipt_seal_count("empty-run").expect("receipt"), 1);
     }
 
     #[test]

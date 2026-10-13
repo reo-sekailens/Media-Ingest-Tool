@@ -2,16 +2,16 @@
 
 Media Ingest Tool is a local-first desktop application for safely ingesting removable camera media. It uses Tauri 2, Rust, React, TypeScript, Vite, and Tailwind CSS.
 
-The local foundation now includes conservative Windows removable-volume discovery, controlled SanDisk reader-slot calibration, bounded verified ingest, BLAKE3 destination readback, SQLite manifest/receipt sealing, camera/time destination sorting, and cooperative cancellation. These are local automated results, not a claim of hardware certification.
+The app includes conservative removable-volume discovery, controlled SanDisk reader-slot calibration, bounded verified ingest, BLAKE3 destination readback, SQLite manifest/receipt sealing, camera/time destination sorting, cooperative cancellation, and guarded card setup. Windows has local automated and limited physical-card evidence; this does not certify every reader, card, or platform.
 
-Physical immutable-card identity through every reader, event-driven macOS lifecycle, privileged macOS formatting, hotplug/reconnect recovery, Linux hardware proof, and signed release artifacts remain incomplete or uncertified. The Format action is intentionally disabled until those exact-device safety gates exist.
+Physical immutable-card identity through every reader, hotplug/reconnect recovery, Linux hardware workflows, and signed release artifacts remain incomplete or uncertified. Windows quick format is available through native target validation and explicit authorization, with a separately confirmed recovery path. macOS formatting remains unavailable pending an authorized native helper; macOS lifecycle and Linux formatting require native-host and hardware verification.
 
 ## Development
 
 Prerequisites and platform notes are in [Development guide](docs/development.md).
 
 ```powershell
-npm install
+npm ci
 npm run check
 npm run tauri dev
 ```
@@ -76,6 +76,29 @@ Every package is named with its target architecture. Downloads include combined 
 
 Windows and Linux packages are unsigned. macOS uses ad-hoc signing, which is not Developer ID signing or notarization. Runner versions and generated packages do not certify runtime or removable-media support. Clean-machine installation, signing/notarization, dependency security audits, SBOM generation, and hardware certification remain in [TASK011](memory-bank/tasks/TASK011-packaging-release-support.md). The existing manual macOS-only installer workflow remains available.
 
+## macOS manual installation
+
+Intel and Apple Silicon use separate native DMGs. The configured minimum is
+macOS 13.3, matching the system WebKit needed by Tailwind 4. An Apple Developer
+account is not required: packages are ad-hoc signed, and a downloaded app may
+need Apple's per-app **Privacy & Security > Open Anyway** exception.
+
+See [Mac installation and permissions](docs/macos-installation.md) and the
+[compatibility review and validation boundaries](docs/macos-compatibility.md).
+Quality checks cover macOS 15/26 on both architectures, including native core,
+disposable APFS/exFAT images, actual WKWebView smoke checks and independently
+checked shipping DMG startup. [Final software/UI checks](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268)
+pass all 16 jobs; [the production candidate](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38349630929)
+passes all four DMG gates with independently verified downloaded hashes. These
+results refer to the retained validation snapshots; their source and checks
+are integrated into `main` without issuing a versioned release;
+physical reader/card, privacy-consent, sleep/wake, and macOS 13.3 runtime
+acceptance remain separate. **macOS Quick Format is unavailable.**
+
+Use APFS or case-sensitive APFS destinations on Mac. ExFAT cards are valid
+sources, but ExFAT destinations lack the atomic no-overwrite publication
+required by the app on tested Mac systems and are rejected safely.
+
 ## Evidence-oriented project workflow
 
 The repository includes an evidence-oriented memory bank and project entry points:
@@ -87,7 +110,7 @@ The repository includes an evidence-oriented memory bank and project entry point
 - Record durable choices in [memory-bank/decisions/README.md](memory-bank/decisions/README.md).
 - Use the GitHub templates for reproducible issues and pull requests.
 
-Before implementation begins, complete the unknowns in `memory-bank/projectbrief.md` and `memory-bank/techContext.md`. Keep facts evidence-based: a build, local test, packaged artifact, and live deployment are distinct kinds of proof.
+Record implementation unknowns and evidence in `memory-bank/projectbrief.md` and `memory-bank/techContext.md`. A build, local test, packaged artifact, and native hardware result are distinct kinds of proof.
 
 Validate the project documentation at any time with:
 

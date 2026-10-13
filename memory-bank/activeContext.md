@@ -2,6 +2,48 @@
 
 ## Current focus
 
+### 2026-10-13 macOS manual-install compatibility
+
+- User scope is Intel and M-series manual installation without Apple Developer
+  credentials or access to a physical Mac. Current primary Apple/Tauri/Rust,
+  filesystem/SQLite/WebKit and dependency guidance is traced in
+  [the compatibility review](../docs/macos-compatibility.md) and its linked audits.
+- Corrected Disk Arbitration callback ABI/Boolean/run-loop ownership, matching
+  diskutil snapshots and readable write-protected card admission. Native eject
+  uses supported arguments and OS-neutral errors. macOS formatting stays blocked
+  pending a privileged helper; it is not enabled by this compatibility work.
+- macOS minimum is 13.3 for Tailwind's system WebKit baseline, with configured
+  ad-hoc signing and five purpose strings. Media/receipt publication uses atomic
+  no-replace rename; exact root OS metadata is excluded consistently. Nested new
+  destinations resolve safely through the existing ancestor. File-backed Mac
+  SQLite verifies WAL/FULL and enables/verifies fullfsync after reopen.
+- Native disk-image observations exposed a missing virtual/physical field;
+  discovery now rejects the exact Disk Image bus protocol. ExFAT full flush
+  succeeded, but exclusive rename returned ENOTSUP. Mac destinations use
+  APFS/APFSX; ExFAT source ingestion and marker writing are tested separately.
+  Unsupported publication preserves source/partial data and returns APFS guidance.
+- Quality now covers macOS 15/26 Intel/ARM, disposable APFS/APFSX/exFAT tests,
+  independently checked DMG installation/startup and native WKWebView/read-only
+  IPC. UI instrumentation is debug-only, separate-ID, loopback-only, and rejected
+  by release compilation. Node validation has no additional JS dependencies.
+- [Final Quality run 38351288268](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268)
+  passed all 16 software/UI jobs at `0984bc7`: each of four Mac hosts passed 142
+  core tests, 21 explicit image tests, and native rendering/read-only IPC checks.
+  The Mac26 ARM harness now uses the pinned official embedded evaluation route;
+  all four UI checks passed on their first attempt with unchanged deadlines.
+- [Production candidate run 38349630929](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38349630929)
+  passed all four DMG/signature/copy/startup gates at `9e4c4fa`. Downloaded bytes
+  match all manifests/checksums/reports. Only the UI adapter/contracts/docs differ
+  at `0984bc7`; production inputs are identical. Matching Intel/ARM installers and
+  original metadata are retained under ignored `output/macos-compatibility/9e4c4fa`.
+  The user subsequently requested all working changes be committed to `main`.
+  Production inputs and the test harness match the retained
+  `codex/macos-compatibility-validation` snapshot; only integration documentation
+  differs. Prior working changes are included. No versioned release is issued.
+  No physical-card, TCC/Gatekeeper, native keyboard,
+  sleep/wake, macOS 13.3 runtime, power-loss or network-volume certification is
+  inferred from documentation, fixtures or runner tests.
+
 ### 2026-10-13 selectable capture clock
 
 - Added a per-card Capture time basis: Camera time is the default and preserves
@@ -159,6 +201,43 @@
   dependency audits remain separate pending gates. Earlier app/UI/interval
   changes were preserved locally outside the packaging commits.
 
+### 2026-10-09 code, operations, and operator review
+
+- Manual, automatic, and recovery ingests now reserve both the current media
+  key and mount under the native scheduler lock. A duplicate request is
+  rejected before planning/persistence; different cards remain concurrent.
+  Terminal cleanup releases the reservation. Windows mount matching ignores
+  case; Unix matching preserves case and significant path characters.
+- Empty manual plans can seal an exact zero-file/zero-byte SQLite receipt.
+  Automatic empty-card skipping remains in place. Recovery checks final-file
+  type, size, and available modification evidence again after readback; this
+  does not establish handle identity or eliminate filesystem races.
+- Shared dialogs contain keyboard focus, isolate background controls, restore
+  trigger focus, support Escape, and retain the dialog during busy destructive
+  work. Destructive dialogs initially focus Cancel. Folder ordering now has
+  arrow/Home/End keyboard controls. Identity details expand, receipt-opening
+  limitations are visible, and source lists use native list semantics. The
+  toolbar now stays visible during scrolling in engines supporting overflow
+  clipping, with the prior horizontal-clipping fallback for older engines.
+- CI now follows repository toolchain files and locked dependencies, uses
+  current explicit runners, and includes bounded jobs and DMG checksum/source
+  manifests. Hosted workflows, packaging, signing, and hardware workflows were
+  not executed by this review.
+- Verification: 23 frontend tests, strict TypeScript, ESLint, and the final
+  production build pass. Windows Rust library tests pass (110 passed, seven
+  hardware cases ignored) using task-local toolchain/cache directories because
+  the workstation's default Rust junction points to unavailable storage.
+  Rust fmt/Clippy (all targets, warnings denied), repository formatting, and
+  memory-bank validation pass. Chromium production-fixture QA at
+  `http://127.0.0.1:4173/` passes at 1440x1000, 390x844, and 720x500: page
+  identity/content, overlay/console health, keyboard ordering, identity details,
+  dialog focus/isolation/Escape, destructive Cancel focus, sticky toolbar, and
+  overflow/short-window checks. Screenshots were captured outside the repository.
+  The Browser plugin was unavailable; Playwright CLI supplied rendered QA.
+- Remaining review work: nested new destination roots need coherent creation
+  and validation; Unix publication needs an atomic no-overwrite primitive.
+  Cross-platform and packaged hardware evidence remains a certification gate.
+
 Implement the remaining TASK004 recovery/durability boundaries alongside conservative TASK002 device identity evidence.
 
 - macOS now starts a native Disk Arbitration run-loop subscription before its
@@ -186,11 +265,11 @@ Implement the remaining TASK004 recovery/durability boundaries alongside conserv
   remain required.
 
 - macOS discovery now descends from whole disks into `Partitions` and
-  `APFSVolumes`, where mounted card volumes appear. It accepts the structured
-  `RemovableMediaOrExternalDevice` and `WritableVolume` evidence emitted by
-  `diskutil info -plist`, retains virtual/internal exclusions, and emits no
-  candidate without explicit writable evidence. Windows-local Rust verification
-  passes; an Apple-native compile and reader-backed SD-card run remain required.
+  `APFSVolumes`, where mounted card volumes appear. The earlier writable-only
+  admission was superseded on 2026-10-13: structured external/internal and
+  matching id/mount evidence plus an actual readable directory check admit
+  write-protected sources. Permission denial/unavailability block ingestion;
+  discovery performs no marker writes. Physical reader-backed checks remain open.
 
 - macOS support diagnostics now persist automatically through Tauri's native
   OS log directory. The Rust boundary records redacted lifecycle, discovery,

@@ -12,6 +12,17 @@
 
 ## Objective
 
+### 2026-10-09 review evidence
+
+Both receipt aggregate queries now return zero committed entries for an empty
+plan rather than SQLite NULL. Tests verify zero-file manual completion and
+refuse nonzero declared file/byte totals for an empty seal. Recovery snapshots
+the final destination's metadata before hashing and rechecks type, length, and
+available modification evidence afterward. A callback-injected change during
+readback is rejected; this is metadata-level evidence rather than inode/handle
+binding. Windows Rust library regression tests pass; hardware, power-loss,
+and non-Windows execution remain unverified.
+
 Prove that every planned source file has a byte-for-byte verified destination, make that proof recoverable after interruption, and issue a narrowly bound authorization that TASK005 can use to format only the exact card generation that completed the verified ingest.
 
 Verification must be quick enough to overlap usefully with copying, but correctness wins over optimistic completion. Count/size checks alone are not verification. A green result requires complete manifest coverage, source stability, a cryptographic comparison, successful destination commit, and durable local state.
@@ -209,6 +220,20 @@ Retry only classified transient failures (temporary sharing violation, disconnec
 - [ ] No recovery, verification, receipt, or format-gate path deletes or modifies source files.
 
 ## Evidence and test plan
+
+- 2026-10-13 Mac compatibility work replaces media/receipt publication with
+  `renamex_np(RENAME_EXCL)` and adds competing-file, occupied receipt and dangling
+  symlink regressions. Collisions preserve the verified partial and existing
+  destination; unsupported exclusive rename remains an error. Windows metadata
+  inventory/nested-destination checks pass. Each of four Intel/ARM Mac15/26
+  hosts passes 142 core tests and 21 explicit APFS/APFSX/exFAT invocations in
+  [run 38351288268](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268)
+  at `0984bc7`. Positive ExFAT-source-to-APFS completion seals the receipt,
+  reopens SQLite, upgrades the marker and preserves source bytes/mtime;
+  unsupported ExFAT destinations retain the source/partial without publication.
+  SQLite on macOS enables/verifies fullfsync and reads back WAL/FULL
+  on file-backed reopen. Directory-entry durability and physical power-loss
+  guarantees remain unverified; macOS formatting remains unavailable.
 
 - Known-answer BLAKE3 vectors plus generated files at 0 B, 1 B, chunk boundary ±1 B, buffer boundary ±1 B, sparse-looking content, multi-GiB logical size where feasible, and many-small-file sets.
 - Mutation matrix for source during read and destination after write: single-bit, truncation, extension, swap, wrong-target, same-size corruption, stale pre-existing file, and timestamp-preserving corruption.
