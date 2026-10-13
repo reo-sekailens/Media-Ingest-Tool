@@ -153,6 +153,17 @@ struct SubscriptionState {
     run_loop: AtomicUsize,
 }
 
+impl Drop for SubscriptionState {
+    fn drop(&mut self) {
+        let run_loop = self.run_loop.load(Ordering::Acquire);
+        if run_loop != 0 {
+            // The retained run loop stays valid even if the worker has already
+            // exited while the subscription's Drop is waking it for shutdown.
+            unsafe { CFRelease(run_loop as CFRunLoopRef) };
+        }
+    }
+}
+
 impl SubscriptionState {
     fn new(sender: SyncSender<DiskArbitrationReconcileRequest>) -> Self {
         Self {
@@ -224,11 +235,17 @@ fn run_session(
         }
 
         let run_loop = CFRunLoopGetCurrent();
+        // Get returns a borrowed object. Keep one owned reference in `state`
+        // because the subscription may access it after this worker exits.
+        CFRetain(run_loop);
         state.run_loop.store(run_loop as usize, Ordering::Release);
         let context = Arc::as_ptr(&state).cast_mut().cast::<c_void>();
         DARegisterDiskAppearedCallback(session, ptr::null(), disk_appeared, context);
         DARegisterDiskDescriptionChangedCallback(
             session,
+            ptr::null(),
+            // Apple's ABI has a separate watched-keys argument. NULL watches
+            // all description keys, including volume mount/path changes.
             ptr::null(),
             disk_description_changed,
             context,
@@ -238,7 +255,6 @@ fn run_session(
 
         if startup.send(Ok(())).is_err() {
             DASessionUnscheduleFromRunLoop(session, run_loop, kCFRunLoopDefaultMode);
-            state.run_loop.store(0, Ordering::Release);
             CFRelease(session);
             return;
         }
@@ -246,11 +262,10 @@ fn run_session(
         while !state.stopped.load(Ordering::Acquire) {
             // One-second timeout is only a shutdown safety net. Native events,
             // rather than polling, drive reconciliation.
-            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0, true);
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0, 1);
         }
 
         DASessionUnscheduleFromRunLoop(session, run_loop, kCFRunLoopDefaultMode);
-        state.run_loop.store(0, Ordering::Release);
         CFRelease(session);
     }
 }
@@ -310,6 +325,7 @@ extern "C" {
     fn DARegisterDiskDescriptionChangedCallback(
         session: DASessionRef,
         matching: CFDictionaryRef,
+        watched_keys: CFArrayRef,
         callback: unsafe extern "C" fn(DADiskRef, CFArrayRef, *mut c_void),
         context: *mut c_void,
     );
@@ -324,13 +340,55 @@ extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     static kCFRunLoopDefaultMode: CFStringRef;
+    fn CFRetain(object: *const c_void) -> *const c_void;
     fn CFRelease(object: *const c_void);
     fn CFRunLoopGetCurrent() -> CFRunLoopRef;
     fn CFRunLoopRunInMode(
         mode: CFStringRef,
         seconds: f64,
-        return_after_source_handled: bool,
+        // CoreFoundation's Boolean is an unsigned byte, not C's _Bool.
+        return_after_source_handled: u8,
     ) -> i32;
     fn CFRunLoopStop(run_loop: CFRunLoopRef);
     fn CFRunLoopWakeUp(run_loop: CFRunLoopRef);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn description_callback_requests_reconciliation_and_coalesces_new_events() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let state = SubscriptionState::new(sender);
+        let context = ptr::from_ref(&state).cast_mut().cast::<c_void>();
+        unsafe {
+            disk_description_changed(ptr::null_mut(), ptr::null(), context);
+        }
+        let first = receiver.try_recv().expect("description wakeup");
+        assert_eq!(first.generation, 1);
+        unsafe {
+            disk_appeared(ptr::null_mut(), context);
+            disk_disappeared(ptr::null_mut(), context);
+        }
+        assert!(receiver.try_recv().is_err(), "events remain coalesced");
+        state.acknowledge(first.generation);
+        let next = receiver.try_recv().expect("event during reconciliation");
+        assert_eq!(next.generation, 3);
+        state.acknowledge(next.generation);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn native_session_registers_all_callbacks_and_stops_without_media_changes() {
+        let (subscription, events) = subscribe(1).expect("native Disk Arbitration startup");
+        assert_ne!(subscription.state.run_loop.load(Ordering::Acquire), 0);
+        let request = events
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("initial disk appearance callback from the running native session");
+        assert!(request.generation > 0);
+        // Real registration catches ABI mistakes before a physical-card run.
+        // No mount, unmount, eject, or format operation is requested.
+        drop(subscription);
+    }
 }

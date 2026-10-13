@@ -2,6 +2,17 @@
 
 ## 2026-10-13
 
+- macOS manual-install review found and corrected native callback/lifetime,
+  write-protected card admission, destination publication and system-metadata
+  inventory gaps. Configured 13.3/ad-hoc distribution, privacy prompt purposes,
+  SQLite full-sync verification and safe nested destination resolution.
+- Added four native Mac runner variants, disposable APFS/exFAT gates, shipping
+  DMG copy/signature/deployment/startup checks and isolated WKWebView/read-only
+  IPC screenshots. Integration/hosted results are pending; see
+  [macOS compatibility](../docs/macos-compatibility.md) for scope and evidence.
+  Physical media, TCC/quarantine/keyboard, sleep/wake, oldest runtime and Mac
+  quick-format implementation remain outside available evidence.
+
 - Added selectable Camera time (default) and Computer local time to card
   configuration, review, and the applied workspace. A shared warning requires
   users to check camera/computer date, time, timezone, and DST synchronization.
@@ -52,7 +63,6 @@
   Rust fmt/strict Clippy, and Windows native tests pass (110 passed, seven
   hardware tests ignored in the isolated staged snapshot). Chromium hour-selection screenshot
   QA passes with visible actions and no overflow or console errors.
-
 - [Hosted Quality run 38331318345](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38331318345)
   passes for `453411b53a1427d2be6d5baad9deb31bb99f3340`, including frontend,
   strict native checks, the real EXIF-file range-copy test on all three OSes,
@@ -116,11 +126,41 @@
   notarization, SBOM and audits remain open. Earlier app/interval/UI changes
   remain uncommitted; only packaging changes and required CI fixes were pushed.
 
+## 2026-10-09
+
+- Completed parallel code, operational, and UI review while preserving the
+  existing interval-folder changes. Added native per-source reservation across
+  manual/automatic/recovery operations, exact empty-plan receipt handling, and
+  post-readback recovery metadata checks. Regression coverage passes in the
+  Windows Rust library suite (110 passed, seven hardware tests ignored).
+- Added shared accessible dialogs with safe destructive initial focus,
+  background isolation, focus containment/restore, Escape handling, busy
+  dismissal protection, and short-window scrolling. Added keyboard folder
+  ordering, working identity details, honest receipt-opening feedback, semantic
+  source lists, consistent automatic-format opt-in, and matching app metadata.
+  All 23 frontend tests, TypeScript, ESLint, and the final build pass.
+- Updated CI to checked-in Node/Rust policy, locked Cargo operations, current
+  Mac architecture runners, job limits/concurrency, and streamed SHA-256 DMG
+  manifests with source provenance. Local manifest fixtures, script syntax,
+  YAML parsing, formatting, and whitespace checks pass. Hosted execution,
+  signing, native packaging, and destructive hardware tests remain unverified.
+- Fixed the sticky toolbar's ancestor scroll container while preserving older
+  engines' horizontal clipping. Production-fixture Chromium QA passes at
+  1440x1000, 390x844, and 720x500: keyboard reorder/focus, identity disclosure,
+  modal isolation/Tab/Escape/restore, safe destructive focus, theme metadata,
+  sticky toolbar, no horizontal overflow, and visible short-window actions.
+  Page title/content and console/overlay checks pass. Screenshots are outside
+  the repository; native desktop execution remains unverified in this review.
+- Rust fmt/Clippy with warnings denied, repository formatting, and memory-bank
+  verification pass. The disconnected default Rust cache was bypassed using
+  isolated task-local homes without changing workstation settings. Follow-up
+  work is retained in TASK003, TASK004, TASK008, TASK009, TASK011, and TASK012.
+
 ## 2026-08-29
 
-- Replaced non-standard `HH-mm_offset` interval folders with portable ISO 8601
-  basic timestamp folders such as `20260823T053000+0800`. Day folders carry
-  the same EXIF capture offset at local midnight. A naive EXIF timestamp keeps
+- Replaced non-standard `HH-mm_offset` interval folders with portable basic
+  time folders such as `053000+0800`, below a separate date parent such as
+  `20260823T000000+0800`. A naive EXIF timestamp keeps
   its recorded camera wall clock and is labelled `-offset-unknown`, rather
   than being converted through the ingest computer's timezone; absent metadata
   uses the explicit UTC filesystem-time fallback.

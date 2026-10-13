@@ -32,6 +32,17 @@ Close the operational gaps around hotplug, pause/cancel, app shutdown, sleep/wak
 
 ## Verification evidence
 
+### 2026-10-09 native scheduler review
+
+Manual, automatic, and explicit recovery requests now reserve the current
+source under the scheduler lock. A second operation using the same media key
+or mount is rejected even with a different operation UUID. Different cards
+remain concurrent; RAII terminal cleanup releases the source for the next run.
+Regression tests check key/mount/UUID conflicts, independent cards, release,
+and Windows mount spelling. Unix matching preserves case; the Unix-specific
+regression is pending a native non-Windows test run. Windows library tests
+pass. No removal, sleep/wake, packaged concurrency, or hardware test was run.
+
 - Deterministic state-machine tests for cancel, removal, reconnect, shutdown, resume, and eject.
 - Fault-injected native runs on each supported OS with sanitized event timelines and receipts.
 - Packaged-app close/sleep/wake/eject screenshots and logs, recorded separately from fixture tests.

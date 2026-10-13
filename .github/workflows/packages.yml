@@ -81,6 +81,9 @@ jobs:
           # Ad-hoc macOS signatures are not Developer ID signatures or notarization.
           APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
         run: npm run tauri build -- --ci --bundles ${{ matrix.bundles }} --target ${{ matrix.target }} -- --locked
+      - name: Verify macOS manual installation and native startup
+        if: runner.os == 'macOS'
+        run: node scripts/verify-macos-bundle.mjs src-tauri/target/${{ matrix.target }}/release/bundle ${{ matrix.target }} macos-validation/report.json
       - name: Stage packages with source provenance and checksums
         run: GITHUB_SHA="$SOURCE_REF" node scripts/package-artifacts.mjs stage src-tauri/target/${{ matrix.target }}/release/bundle package-assets ${{ matrix.target }}
       - name: Upload package assets
@@ -89,3 +92,10 @@ jobs:
           name: packages-${{ matrix.target }}
           path: package-assets/
           if-no-files-found: error
+      - name: Preserve macOS native validation evidence
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-package-validation-${{ matrix.target }}
+          path: macos-validation/
+          if-no-files-found: warn

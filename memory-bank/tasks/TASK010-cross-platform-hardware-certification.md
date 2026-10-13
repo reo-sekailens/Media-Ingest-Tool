@@ -40,6 +40,14 @@ Prove behavior with automated fixtures and real sacrificial media on every decla
 
 ## Current evidence boundary
 
+- 2026-10-13: macOS compatibility validation adds native Intel/ARM runners on
+  15/26, real-file core tests on disposable APFS, case-sensitive APFS and exFAT
+  disk images, shipping-DMG startup checks and separate-ID WKWebView/IPC smoke
+  screenshots. Hosted results are pending. Virtual filesystem evidence is not
+  physical-card, reader, throughput, power-loss, sleep/wake, privacy/quarantine
+  or safe-eject certification. macOS 13.3 is configured but not runtime-tested;
+  macOS formatting remains unavailable. See [the audit](../../docs/macos-compatibility.md).
+
 - The cross-platform GitHub Actions Rust matrix now installs the Linux system
   D-Bus development headers required by the direct UDisks provider before
   running `cargo fmt`, clippy, and tests. This prepares the Linux source gate

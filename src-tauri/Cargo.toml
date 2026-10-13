@@ -14,6 +14,10 @@ edition = "2021"
 name = "media_ingest_tool_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Native WKWebView automation is compiled only for dedicated debug test builds.
+macos-ui-tests = ["dep:tauri-plugin-wdio-webdriver"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -35,6 +39,9 @@ fs2 = "0.4"
 unicode-normalization = "0.1"
 unicode-casefold = "0.2"
 plist = "1.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri-plugin-wdio-webdriver = { version = "=1.5.0", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Ole", "Win32_System_Rpc", "Win32_System_Variant", "Win32_System_Wmi", "Win32_Storage_IscsiDisc", "Win32_Devices_DeviceAndDriverInstallation"] }

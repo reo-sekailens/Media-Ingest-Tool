@@ -31,6 +31,13 @@ Treat attached media and all path/metadata content as untrusted, constrain the T
 
 ## Verification evidence
 
+- 2026-10-09 source review: Unix destination publication still checks for an
+  existing final path before a potentially replacing rename. Implement and
+  qualify a platform-appropriate atomic no-overwrite primitive; an earlier
+  existence check alone is not a no-clobber guarantee. Windows and Unix
+  handle-based anti-race traversal remain separate follow-up work. This review
+  performed no exploit reproduction or hostile-media/hardware run.
+
 - Tauri capability review and IPC allowlist test.
 - Cross-platform adversarial filesystem fixture suite.
 - Race tests that swap mount/device observations between confirmation and execution.

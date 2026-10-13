@@ -12,6 +12,17 @@
 
 ## Objective
 
+### 2026-10-09 review evidence
+
+Both receipt aggregate queries now return zero committed entries for an empty
+plan rather than SQLite NULL. Tests verify zero-file manual completion and
+refuse nonzero declared file/byte totals for an empty seal. Recovery snapshots
+the final destination's metadata before hashing and rechecks type, length, and
+available modification evidence afterward. A callback-injected change during
+readback is rejected; this is metadata-level evidence rather than inode/handle
+binding. Windows Rust library regression tests pass; hardware, power-loss,
+and non-Windows execution remain unverified.
+
 Prove that every planned source file has a byte-for-byte verified destination, make that proof recoverable after interruption, and issue a narrowly bound authorization that TASK005 can use to format only the exact card generation that completed the verified ingest.
 
 Verification must be quick enough to overlap usefully with copying, but correctness wins over optimistic completion. Count/size checks alone are not verification. A green result requires complete manifest coverage, source stability, a cryptographic comparison, successful destination commit, and durable local state.

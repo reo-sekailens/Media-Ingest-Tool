@@ -28,6 +28,30 @@ Ship reproducible native desktop artifacts and publish an honest support contrac
 
 ## Verification evidence
 
+### 2026-10-13 ad-hoc manual installation
+
+The user requires Intel and Apple Silicon DMGs without an Apple Developer
+account. Developer ID signing/notarization are optional future distribution
+work, not required for this requested manual-install route. The macOS config
+uses minimum 13.3, hardened runtime and ad-hoc identity; Info.plist includes five
+accurate privacy descriptions. [Installation guidance](../../docs/macos-installation.md)
+documents checksum/architecture choice, Applications copy, per-app Open Anyway,
+Files & Folders and Apple Silicon laptop accessory approval.
+
+Quality covers macOS 15/26 on both native architectures, with core/filesystem
+checks, debug-only separate-ID WKWebView automation and independent shipping
+DMG verification. Packaging requires valid ad-hoc signatures before/after copy,
+matching plist/privacy/icon, native Mach-O architecture, bounded deployment
+target, system/bundled dependencies and fresh-profile LaunchServices startup.
+Exact-source hosted results remain pending. The test driver is not shipped.
+
+See [compatibility coverage](../../docs/macos-compatibility.md),
+[package gate](../../docs/macos-package-validation.md) and
+[native UI gate](../../docs/macos-ui-validation.md). Download quarantine/TCC,
+macOS 13.3 actual runtime, physical hardware, sleep/wake and privileged formatting
+remain explicit acceptance gaps. Existing main/uncommitted work is preserved;
+an isolated validation snapshot is not a default-branch release.
+
 ### 2026-10-10 nightly and release automation
 
 Nightly publication runs at 02:17 Asia/Singapore from one immutable snapshot of
@@ -77,6 +101,20 @@ The release is published and marked prerelease. A version-tag release was not
 issued; its metadata safeguards and workflow syntax/trigger configuration are
 verified locally. This completes the requested automation work, while TASK011
 remains open for signing, runtime installation, SBOM/audits and certification.
+
+### 2026-10-09 operational review
+
+Quality and installer workflows now read `.node-version`, activate the
+`rust-toolchain.toml` policy, use locked Cargo operations, and limit job duration
+and superseded runs. Quality uses Ubuntu 24.04, macOS 15, and Windows Server
+2022; installer builds use macOS 15 Intel/Apple Silicon runners after the
+macOS 13 runner retirement. These are build environments, not newly certified
+runtime support. DMG uploads include streamed SHA-256 checksums and a JSON
+manifest with source commit, target/build architecture, and toolchain policy.
+Local script fixtures check known hashes, nested/spaced names, `.app` exclusion,
+and missing-artifact/provenance rejection. Syntax, YAML parsing, and scoped
+formatting/lint pass. Hosted CI, artifact generation, signing/notarization,
+dependency audits, SBOM, and clean-machine install remain unverified.
 
 - Native CI logs and artifact hashes for every supported OS/architecture pair.
 - Install/start/uninstall smoke-test records from clean machines or clean user profiles.

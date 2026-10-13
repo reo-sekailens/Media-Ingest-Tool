@@ -1,6 +1,16 @@
 name: Quality
 
 on:
+  workflow_dispatch:
+    inputs:
+      source-ref:
+        description: Optional immutable source commit SHA (defaults to dispatched revision)
+        required: false
+        type: string
+      check-only:
+        description: Skip distribution app/DMG packaging (native UI checks still run)
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       source-ref:
@@ -28,7 +38,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2022]
+        os:
+          [
+            ubuntu-24.04,
+            macos-15-intel,
+            macos-15,
+            macos-26-intel,
+            macos-26,
+            windows-2022,
+          ]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,6 +63,8 @@ jobs:
       - run: npm test
       - name: Test packaging and release safeguards
         run: node --test scripts/*.test.mjs
+      - name: Test native UI WebDriver transport contract
+        run: node --test tests/native-macos/webdriver.contract.mjs
       - run: npm run build
 
   rust:
@@ -54,7 +74,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2022]
+        os:
+          [
+            ubuntu-24.04,
+            macos-15-intel,
+            macos-15,
+            macos-26-intel,
+            macos-26,
+            windows-2022,
+          ]
     defaults:
       run:
         working-directory: src-tauri
@@ -81,13 +109,44 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
+      - name: Test ingest on disposable macOS filesystem images
+        if: runner.os == 'macOS'
+        run: bash ../scripts/test-macos-filesystems.sh
+      - name: Capture installed macOS diskutil reference
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p "$RUNNER_TEMP/macos-native-evidence"
+          /usr/bin/sw_vers > "$RUNNER_TEMP/macos-native-evidence/os-version.txt"
+          MANPAGER=cat /usr/bin/man diskutil | /usr/bin/col -b > "$RUNNER_TEMP/macos-native-evidence/diskutil-reference.txt"
+      - name: Preserve native CLI and filesystem evidence
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-native-evidence-${{ matrix.os }}
+          path: ${{ runner.temp }}/macos-native-evidence/
+          if-no-files-found: warn
 
-  macos-package:
-    name: macOS unsigned package
+  macos-native-ui:
+    name: macOS WKWebView (${{ matrix.os }})
     needs: [frontend, rust]
-    if: ${{ !inputs.check-only }}
-    runs-on: macos-15
-    timeout-minutes: 60
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            architecture: x86_64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            architecture: arm64
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+            architecture: x86_64
+          - os: macos-26
+            target: aarch64-apple-darwin
+            architecture: arm64
     env:
       APPLE_SIGNING_IDENTITY: "-"
     steps:
@@ -99,18 +158,85 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
-      - name: Activate repository Rust toolchain
-        run: rustc --version
+      - name: Activate repository Rust toolchain and native target
+        run: |
+          rustc --version
+          rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-          key: macos-smoke-package
+          key: macos-ui-${{ matrix.os }}
       - run: npm ci
-      - run: npm run tauri build -- --ci --bundles app,dmg -- --locked
+      - name: Build isolated test-only app
+        # Shipping package jobs never enable this embedded test driver.
+        run: npm run tauri -- build --ci --debug --target ${{ matrix.target }} --bundles app --features macos-ui-tests --config tests/native-macos/tauri.test.conf.json -- --locked
+      - name: Verify native WKWebView and read-only IPC
+        run: >-
+          node scripts/run-macos-ui.mjs
+          --app 'src-tauri/target/${{ matrix.target }}/debug/bundle/macos/Media Ingest Tool.app'
+          --output '${{ runner.temp }}/macos-ui-evidence'
+          --expected-arch ${{ matrix.architecture }}
+      - name: Preserve native UI screenshots and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-ui-${{ matrix.os }}
+          path: ${{ runner.temp }}/macos-ui-evidence/
+          if-no-files-found: warn
+
+  macos-package:
+    name: macOS manual-install package (${{ matrix.os }})
+    needs: [frontend, rust]
+    if: ${{ !inputs.check-only }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+          - os: macos-26
+            target: aarch64-apple-darwin
+    env:
+      APPLE_SIGNING_IDENTITY: "-"
+      ARTIFACT_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-ref || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Activate repository Rust toolchain
+        run: |
+          rustc --version
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: macos-smoke-package-${{ matrix.os }}
+      - run: npm ci
+      - run: npm run tauri build -- --ci --bundles app,dmg --target ${{ matrix.target }} -- --locked
+      - name: Verify DMG installation and native startup
+        run: node scripts/verify-macos-bundle.mjs src-tauri/target/${{ matrix.target }}/release/bundle ${{ matrix.target }} macos-validation/report.json
       - name: Record DMG checksums and source provenance
-        run: node scripts/write-dmg-manifest.mjs src-tauri/target/release/bundle
+        run: node scripts/write-dmg-manifest.mjs src-tauri/target/${{ matrix.target }}/release/bundle
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-unsigned-bundle
-          path: src-tauri/target/release/bundle
+          name: macos-adhoc-bundle-${{ matrix.os }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle
           if-no-files-found: error
+      - name: Preserve native validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-validation-${{ matrix.os }}
+          path: macos-validation/
+          if-no-files-found: warn
