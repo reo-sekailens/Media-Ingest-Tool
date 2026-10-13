@@ -18,6 +18,27 @@
 
 ## Objective
 
+### 2026-10-13 capture-time choice and clock warning
+
+Organization uses a keyboard-operable radio group for Camera time (default) and
+Computer local time. Review and the applied workspace show the choice. A shared
+warning tells users to synchronize camera/computer date, time, timezone, and DST
+settings before capture-time sorting. Unknown offsets keep their recorded clock
+in both modes and are explained. Normal Original tree hides clock controls and
+warnings; an invalid saved basis exposes controls so it can be corrected.
+
+Draft cancel leaves applied settings unchanged. Card saves, legacy hydration,
+computer-local hydration, preview, manual ingest, and future-mount automatic
+ingest are covered by typed integration tests. All 99 frontend tests, TypeScript,
+ESLint, production build, and source formatting pass. Chromium fixture QA at
+1440x1000, 390x844, and 720x500 covers keyboard selection, review/save/reopen,
+Escape discard, scrolling and visible actions, with no horizontal overflow or
+console errors. Light desktop, dark mobile, review, and saved-workspace screenshots are retained
+outside Git. Preview paths/status are scoped to the exact source, applied
+settings, and latest request; saving invalidates pending tokens. Eight regressions
+cover deferred stale responses/errors, newer previews, and source changes. Playwright CLI was used because the Browser plugin was unavailable.
+This is fixture-rendered evidence, not packaged/native IPC or physical-card proof.
+
 ### 2026-10-13 step configuration
 
 The selected card now uses one draft-based dialog for Destination, Organization,

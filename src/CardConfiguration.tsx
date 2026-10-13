@@ -15,6 +15,7 @@ import {
   type SortPreset,
 } from "./configuration";
 import { Modal } from "./Modal";
+import { CaptureTimeWarning } from "./CaptureTimeWarning";
 import "./CardConfiguration.css";
 
 type CardConfigurationProps = {
@@ -73,6 +74,9 @@ export function CardConfiguration({
   const errorMessage = useRef<HTMLParagraphElement>(null);
   const busy = saving || choosingDestination;
   const displayedError = stepError || error;
+  const captureTimeBasisIsValid =
+    draft.captureTimeBasis === "camera_recorded" ||
+    draft.captureTimeBasis === "computer_local";
   const sortRequest = resolveSortRequest(draft.sortPreset, draft.customIntervalMinutes);
   const order = orderedSegments(draft);
   const folderLabels = order.map((segment) =>
@@ -339,6 +343,70 @@ export function CardConfiguration({
                     </button>
                   ))}
                 </div>
+                {draft.sortPreset !== "original_tree" || !captureTimeBasisIsValid ? (
+                  <>
+                    {draft.sortPreset !== "original_tree" ? (
+                      <CaptureTimeWarning />
+                    ) : null}
+                    <fieldset className="card-configuration__stack">
+                      <legend className="card-configuration__label">
+                        Capture time basis
+                      </legend>
+                      <label className="card-configuration__option">
+                        <input
+                          type="radio"
+                          name="capture-time-basis"
+                          aria-label="Camera time"
+                          aria-describedby="card-configuration-camera-time-help"
+                          value="camera_recorded"
+                          checked={draft.captureTimeBasis === "camera_recorded"}
+                          onChange={() =>
+                            updateDraft({ captureTimeBasis: "camera_recorded" })
+                          }
+                        />
+                        <span>
+                          <strong>Camera time</strong>
+                          <span
+                            id="card-configuration-camera-time-help"
+                            className="card-configuration__hint"
+                          >
+                            Keep the camera&apos;s recorded wall clock and time-zone
+                            offset.
+                          </span>
+                        </span>
+                      </label>
+                      <label className="card-configuration__option">
+                        <input
+                          type="radio"
+                          name="capture-time-basis"
+                          aria-label="Computer local time"
+                          aria-describedby="card-configuration-computer-time-help"
+                          value="computer_local"
+                          checked={draft.captureTimeBasis === "computer_local"}
+                          onChange={() =>
+                            updateDraft({ captureTimeBasis: "computer_local" })
+                          }
+                        />
+                        <span>
+                          <strong>Computer local time</strong>
+                          <span
+                            id="card-configuration-computer-time-help"
+                            className="card-configuration__hint"
+                          >
+                            Convert a capture with a recorded offset to this
+                            computer&apos;s local time zone at the capture date,
+                            including daylight saving time.
+                          </span>
+                        </span>
+                      </label>
+                      <p className="card-configuration__hint">
+                        If the camera offset is missing, both choices keep its recorded
+                        wall clock and label the folder <code>offset-unknown</code>; the
+                        app cannot convert that capture.
+                      </p>
+                    </fieldset>
+                  </>
+                ) : null}
                 {draft.sortPreset === "exif_custom" ? (
                   <label className="card-configuration__interval">
                     Every{" "}
@@ -359,7 +427,8 @@ export function CardConfiguration({
                     <span className="card-configuration__hint">1–1,440 minutes</span>
                   </label>
                 ) : null}
-                {draft.sortPreset === "exif_hour" ? (
+                {draft.sortPreset === "exif_hour" &&
+                draft.captureTimeBasis === "camera_recorded" ? (
                   <p className="card-configuration__hint">
                     EXIF hour example: a 13:42 capture with a recorded +08:00 offset
                     uses <code>1300-1400+0800</code>. The capture date stays in a
@@ -642,6 +711,16 @@ export function CardConfiguration({
                         : ""}
                     </dd>
                   </div>
+                  {draft.sortPreset !== "original_tree" ? (
+                    <div>
+                      <dt>Capture time basis</dt>
+                      <dd>
+                        {draft.captureTimeBasis === "computer_local"
+                          ? "Computer local time · use the local time zone at the capture date"
+                          : "Camera time · keep the recorded wall clock and offset"}
+                      </dd>
+                    </div>
+                  ) : null}
                   <div>
                     <dt>Folder order</dt>
                     <dd className="card-configuration__review-path">
@@ -673,6 +752,7 @@ export function CardConfiguration({
                     </dd>
                   </div>
                 </dl>
+                {draft.sortPreset !== "original_tree" ? <CaptureTimeWarning /> : null}
                 {draft.persistOnCard ? (
                   <p className="card-configuration__hint">
                     The saved card marker is mutable. Every ingest and format remains

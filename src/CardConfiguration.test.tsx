@@ -4,7 +4,11 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { expect, test, vi } from "vitest";
 import { CardConfiguration } from "./CardConfiguration";
-import { createConfiguration, resolveSortRequest } from "./configuration";
+import {
+  createConfiguration,
+  resolveSortRequest,
+  type CaptureTimeBasis,
+} from "./configuration";
 
 type ConfigurationProps = ComponentProps<typeof CardConfiguration>;
 
@@ -155,6 +159,162 @@ test("saves EXIF hour as a sixty-minute request with every ordered folder level"
   ]);
 });
 
+test("time-based sorting defaults to camera time and explains clocks, timezone, and missing offsets", () => {
+  renderConfiguration();
+  next();
+  expect(screen.getByRole("group", { name: "Capture time basis" })).toBeVisible();
+  expect(screen.getByRole("radio", { name: "Camera time" })).toBeChecked();
+  expect(screen.getByRole("radio", { name: "Computer local time" })).not.toBeChecked();
+  const warning = screen.getByRole("note", {
+    name: "Synchronize camera and computer clocks",
+  });
+  expect(warning).toHaveTextContent(
+    "correct date, time, time zone, and daylight saving time settings",
+  );
+  expect(warning).toHaveTextContent(
+    "An incorrect camera clock can place files in the wrong folders.",
+  );
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.getByText(/If the camera offset is missing/)).toHaveTextContent(
+    "recorded wall clock",
+  );
+  expect(screen.getByText("offset-unknown")).toBeVisible();
+  expect(screen.getByText(/If the camera offset is missing/)).toHaveTextContent(
+    "cannot convert that capture",
+  );
+});
+
+test("computer time survives switching to original folders, review, and the final save", () => {
+  const { onSave } = renderConfiguration();
+  next();
+  fireEvent.click(screen.getByRole("radio", { name: "Computer local time" }));
+  expect(screen.getByRole("radio", { name: "Computer local time" })).toBeChecked();
+  expect(
+    screen.getByText(/Convert a capture with a recorded offset/),
+  ).toHaveTextContent(
+    "local time zone at the capture date, including daylight saving time",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Original tree" }));
+  expect(
+    screen.queryByRole("group", { name: "Capture time basis" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("note", { name: "Synchronize camera and computer clocks" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "EXIF hour" }));
+  expect(screen.getByRole("radio", { name: "Computer local time" })).toBeChecked();
+  expect(screen.queryByText("1300-1400+0800")).not.toBeInTheDocument();
+  next();
+  next();
+  expect(
+    screen.getByText(
+      "Computer local time · use the local time zone at the capture date",
+    ),
+  ).toBeVisible();
+  expect(
+    screen.getByRole("note", { name: "Synchronize camera and computer clocks" }),
+  ).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
+  expect(onSave).toHaveBeenCalledOnce();
+  expect(onSave.mock.calls[0][0]).toEqual(
+    expect.objectContaining({
+      captureTimeBasis: "computer_local",
+      sortPreset: "exif_hour",
+      destinationDepthOrder: [
+        { kind: "camera_model" },
+        { kind: "capture_day" },
+        { kind: "capture_interval" },
+      ],
+    }),
+  );
+});
+
+test("busy configuration locks the time-basis controls and keeps its current selection", () => {
+  const { props, rerender } = renderConfiguration();
+  next();
+  rerender(<CardConfiguration {...props} saving />);
+  const camera = screen.getByRole("radio", { name: "Camera time" });
+  const computer = screen.getByRole("radio", { name: "Computer local time" });
+  expect(camera).toBeDisabled();
+  expect(computer).toBeDisabled();
+  fireEvent.click(computer);
+  expect(camera).toBeChecked();
+  expect(computer).not.toBeChecked();
+});
+
+test("a malformed saved time basis needs an explicit correction before progression", () => {
+  const { onSave } = renderConfiguration({
+    initialValue: createConfiguration({
+      destinationPath: "D:/Ingest",
+      captureTimeBasis: "system_now" as CaptureTimeBasis,
+    }),
+  });
+  next();
+  expect(screen.getByRole("radio", { name: "Camera time" })).not.toBeChecked();
+  expect(screen.getByRole("radio", { name: "Computer local time" })).not.toBeChecked();
+  next();
+  expect(screen.getByRole("heading", { name: "Organization" })).toBeVisible();
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Choose camera time or computer local time.",
+  );
+  expect(onSave).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("radio", { name: "Camera time" }));
+  next();
+  expect(screen.getByRole("heading", { name: "Automation" })).toBeVisible();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+test("original-folder review omits the time-basis choice and clock warning", () => {
+  renderConfiguration({
+    initialValue: createConfiguration({
+      destinationPath: "D:/Ingest",
+      sortPreset: "original_tree",
+      captureTimeBasis: "computer_local",
+    }),
+  });
+  goToReview();
+  expect(screen.queryByText("Capture time basis")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("note", { name: "Synchronize camera and computer clocks" }),
+  ).not.toBeInTheDocument();
+});
+
+test("original-folder settings expose a malformed time basis for correction without changing sorting", () => {
+  const { onSave } = renderConfiguration({
+    initialValue: createConfiguration({
+      destinationPath: "D:/Ingest",
+      sortPreset: "original_tree",
+      captureTimeBasis: "system_now" as CaptureTimeBasis,
+    }),
+  });
+  next();
+  expect(screen.getByRole("group", { name: "Capture time basis" })).toBeVisible();
+  expect(
+    screen.queryByRole("note", { name: "Synchronize camera and computer clocks" }),
+  ).not.toBeInTheDocument();
+  next();
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Choose camera time or computer local time.",
+  );
+  fireEvent.click(screen.getByRole("radio", { name: "Camera time" }));
+  expect(
+    screen.queryByRole("group", { name: "Capture time basis" }),
+  ).not.toBeInTheDocument();
+  next();
+  next();
+  expect(screen.getByRole("heading", { name: "Review configuration" })).toBeVisible();
+  expect(
+    screen.queryByRole("note", { name: "Synchronize camera and computer clocks" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
+  expect(onSave).toHaveBeenCalledWith(
+    expect.objectContaining({
+      sortPreset: "original_tree",
+      captureTimeBasis: "camera_recorded",
+    }),
+  );
+});
+
 test("cancelling a draft leaves the original destination and nested folders untouched", () => {
   const initialValue = createConfiguration({
     destinationPath: "D:\\Ingest\\Original",
@@ -171,6 +331,7 @@ test("cancelling a draft leaves the original destination and nested folders unto
     target: { value: "E:\\Changed draft" },
   });
   next();
+  fireEvent.click(screen.getByRole("radio", { name: "Computer local time" }));
   fireEvent.change(screen.getByLabelText("Custom folder 1 value"), {
     target: { value: "Changed folder" },
   });
@@ -178,6 +339,7 @@ test("cancelling a draft leaves the original destination and nested folders unto
   expect(onDismiss).toHaveBeenCalledOnce();
   expect(onSave).not.toHaveBeenCalled();
   expect(initialValue).toEqual(original);
+  expect(initialValue.captureTimeBasis).toBe("camera_recorded");
 });
 
 test("Back retains destination, interval, and folder edits within the draft", () => {
@@ -187,6 +349,7 @@ test("Back retains destination, interval, and folder edits within the draft", ()
   });
   next();
   fireEvent.click(screen.getByRole("button", { name: "Custom interval" }));
+  fireEvent.click(screen.getByRole("radio", { name: "Computer local time" }));
   fireEvent.change(screen.getByLabelText("Custom interval minutes"), {
     target: { value: "37" },
   });
@@ -198,6 +361,7 @@ test("Back retains destination, interval, and folder edits within the draft", ()
   fireEvent.click(screen.getByRole("button", { name: "Back" }));
   expect(screen.getByLabelText("Custom interval minutes")).toHaveValue(37);
   expect(screen.getByLabelText("Custom folder 1 value")).toHaveValue("Day 03");
+  expect(screen.getByRole("radio", { name: "Computer local time" })).toBeChecked();
   fireEvent.click(screen.getByRole("button", { name: "Back" }));
   expect(screen.getByLabelText("Destination directory")).toHaveValue(
     "E:\\Ingest\\Revised",

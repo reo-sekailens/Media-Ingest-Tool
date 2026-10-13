@@ -1,5 +1,23 @@
 # Decisions
 
+## 2026-10-13 — Make capture clock selection explicit
+
+**Status:** accepted
+
+**Decision:** Default to the camera's recorded capture clock. Offer a per-card
+Computer local time option for known instants, resolving the host timezone at
+the capture date. Preserve unknown-offset clocks in either mode. Warn users to
+check camera/computer date, time, timezone, and DST synchronization.
+
+**Rationale:** Operators requested camera defaults and an explicit choice when
+camera and computer timezones differ. Applying the host's current offset or
+borrowing another EXIF timestamp's offset can silently move date/hour folders.
+
+**Consequences:** Legacy profiles preserve camera-time behavior. Schema 14 adds
+the local profile preference without changing the compact on-card marker.
+Recovery uses frozen paths. OS timezone rules govern new computer-local plans;
+no pinned IANA zone or per-camera unknown-offset inference is claimed.
+
 ## 2026-08-23 — Initialize a repository-local memory bank
 
 **Status:** accepted

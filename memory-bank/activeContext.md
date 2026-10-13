@@ -2,6 +2,45 @@
 
 ## Current focus
 
+### 2026-10-13 selectable capture clock
+
+- Added a per-card Capture time basis: Camera time is the default and preserves
+  the recorded wall clock/offset; Computer local time converts known instants
+  through the host timezone at the capture date, including historical DST.
+  Missing or unusable original offsets preserve the camera clock and remain
+  offset-unknown in both modes. The host's present offset is never substituted.
+- The four-step dialog, review, and applied workspace show the choice and a
+  warning to synchronize camera/computer date, time, timezone, and DST settings.
+  Manual preview/ingest and future automatic mounts share the saved selection.
+  Legacy requests and profiles default to Camera time. SQLite schema 14 adds a
+  constrained preference column; the compact on-card marker is unchanged.
+- The EXIF adapter accepts only OffsetTimeOriginal for DateTimeOriginal. It
+  reconstructs the recorded wall clock to avoid borrowing unrelated digitized
+  or modified-time offsets from the pinned parser. Source modification time
+  remains an explicit UTC fallback. Missing fallback time now propagates an
+  error rather than using ingest time; valid embedded clocks skip that fallback.
+  Original-tree planning bypasses capture metadata entirely. Recovery retains
+  frozen destination paths regardless of current timezone or preferences.
+- Pending preview responses now require the exact source/generation/root,
+  applied-settings signature, and latest request. Saving invalidates pending
+  tokens before applying changes. Eight regressions cover stale responses/errors,
+  newer requests, and card changes; obsolete paths/operation IDs cannot reappear.
+- Verification passes: all 99 frontend tests, TypeScript, ESLint, production build,
+  formatting, memory-bank validation, and isolated staged Rust fmt/strict Clippy
+  with all-target native tests (126 passed, seven physical hardware cases ignored).
+  Actual TIFF EXIF checks cover 2,879 numeric minute offsets; injected conversion
+  tests cover every civil minute offset and a repeated DST hour. Real-file native
+  tests copy eight offset/calendar fixtures for both choices and verify bytes,
+  source preservation, paths, BLAKE3 readback, and receipts. Profile migration,
+  reopen persistence, clock-free OriginalTree, and frozen recovery pass.
+- Chromium fixture QA confirms camera defaults, keyboard selection,
+  review/save/reopen, Escape discard, visible actions, and no overflow or console
+  errors at desktop/mobile sizes. Screenshots remain outside Git. The isolated
+  all-target build outgrew the E: cache; a separate C: cache completed verification
+  without deleting the old cache. This does not establish physical-card saving,
+  native IPC/webview rendering, or a broad real-camera format corpus. Host timezone
+  rules remain supplied by the OS; versions can differ for newly created plans.
+
 ### 2026-10-13 capture-hour range folders
 
 - EXIF-hour organization now projects a capture at 13:42/+08:00 into a separate

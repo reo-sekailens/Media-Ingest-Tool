@@ -1,12 +1,12 @@
 //! Rust-owned durable configuration for trusted ingest state.
 
 use crate::identity::IdentityStrength;
-use crate::organization::{CustomDirectoryField, DestinationDepthSegment};
+use crate::organization::{CaptureTimeBasis, CustomDirectoryField, DestinationDepthSegment};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Serialize;
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 pub struct LocalStore {
     connection: Connection,
@@ -88,6 +88,7 @@ pub struct MarkerIngestProfile {
     pub marker_token: String,
     pub destination_path: String,
     pub sort_mode: String,
+    pub capture_time_basis: CaptureTimeBasis,
     /// The interval selected for `camera_interval`; no guessed value is used
     /// when a registered card mounts again.
     pub interval_minutes: Option<u16>,
@@ -188,6 +189,7 @@ impl LocalStore {
               marker_token TEXT PRIMARY KEY,
               destination_path TEXT NOT NULL,
               sort_mode TEXT NOT NULL CHECK(sort_mode IN ('original_tree', 'camera_day', 'camera_interval')),
+              capture_time_basis TEXT NOT NULL DEFAULT 'camera_recorded' CHECK(capture_time_basis IN ('camera_recorded', 'computer_local')),
               interval_minutes INTEGER CHECK(interval_minutes IS NULL OR (interval_minutes >= 1 AND interval_minutes <= 1440)),
               custom_directory_fields_json TEXT NOT NULL DEFAULT '[]',
               destination_depth_order_json TEXT NOT NULL DEFAULT '[]',
@@ -252,7 +254,15 @@ impl LocalStore {
             "destination_depth_order_json",
             "TEXT NOT NULL DEFAULT '[]'",
         )?;
-        debug_assert_eq!(SCHEMA_VERSION, 13);
+        self.add_column_if_missing(
+            "marker_ingest_profile",
+            "capture_time_basis",
+            "TEXT NOT NULL DEFAULT 'camera_recorded' CHECK(capture_time_basis IN ('camera_recorded', 'computer_local'))",
+        )?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_migration(version) VALUES (?1)",
+            [SCHEMA_VERSION],
+        )?;
         Ok(())
     }
 
@@ -324,16 +334,30 @@ impl LocalStore {
         profile: &MarkerIngestProfile,
     ) -> rusqlite::Result<()> {
         self.connection.execute(
-            "INSERT INTO marker_ingest_profile(marker_token, destination_path, sort_mode, interval_minutes, custom_directory_fields_json, destination_depth_order_json, auto_ingest_enabled, auto_format_enabled)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO marker_ingest_profile(marker_token, destination_path, sort_mode, interval_minutes, custom_directory_fields_json, destination_depth_order_json, auto_ingest_enabled, auto_format_enabled, capture_time_basis)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(marker_token) DO UPDATE SET destination_path = excluded.destination_path,
                  sort_mode = excluded.sort_mode, interval_minutes = excluded.interval_minutes,
                  custom_directory_fields_json = excluded.custom_directory_fields_json,
                  destination_depth_order_json = excluded.destination_depth_order_json,
                  auto_ingest_enabled = excluded.auto_ingest_enabled,
                  auto_format_enabled = excluded.auto_format_enabled,
+                 capture_time_basis = excluded.capture_time_basis,
                  updated_at = CURRENT_TIMESTAMP",
-            params![profile.marker_token, profile.destination_path, profile.sort_mode, profile.interval_minutes, serde_json::to_string(&profile.custom_directory_fields).unwrap_or_else(|_| "[]".into()), serde_json::to_string(&profile.destination_depth_order).unwrap_or_else(|_| "[]".into()), profile.auto_ingest_enabled, profile.auto_format_enabled],
+            params![
+                profile.marker_token,
+                profile.destination_path,
+                profile.sort_mode,
+                profile.interval_minutes,
+                serde_json::to_string(&profile.custom_directory_fields).unwrap_or_else(|_| "[]".into()),
+                serde_json::to_string(&profile.destination_depth_order).unwrap_or_else(|_| "[]".into()),
+                profile.auto_ingest_enabled,
+                profile.auto_format_enabled,
+                match profile.capture_time_basis {
+                    CaptureTimeBasis::CameraRecorded => "camera_recorded",
+                    CaptureTimeBasis::ComputerLocal => "computer_local",
+                },
+            ],
         )?;
         Ok(())
     }
@@ -344,7 +368,7 @@ impl LocalStore {
     ) -> rusqlite::Result<Option<MarkerIngestProfile>> {
         self.connection
             .query_row(
-                "SELECT marker_token, destination_path, sort_mode, interval_minutes, custom_directory_fields_json, destination_depth_order_json, auto_ingest_enabled, auto_format_enabled
+                "SELECT marker_token, destination_path, sort_mode, interval_minutes, custom_directory_fields_json, destination_depth_order_json, auto_ingest_enabled, auto_format_enabled, capture_time_basis
              FROM marker_ingest_profile WHERE marker_token = ?1",
                 params![marker_token],
                 |row| {
@@ -352,6 +376,8 @@ impl LocalStore {
                         marker_token: row.get(0)?,
                         destination_path: row.get(1)?,
                         sort_mode: row.get(2)?,
+                        capture_time_basis: serde_json::from_value(serde_json::Value::String(row.get(8)?))
+                            .map_err(|error| rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(error)))?,
                         interval_minutes: row.get(3)?,
                         custom_directory_fields: serde_json::from_str::<Vec<CustomDirectoryField>>(&row.get::<_, String>(4)?).unwrap_or_default(),
                         destination_depth_order: serde_json::from_str::<Vec<DestinationDepthSegment>>(&row.get::<_, String>(5)?).unwrap_or_default(),
@@ -1243,6 +1269,7 @@ mod tests {
             marker_token: "MIT1:00000000-0000-4000-8000-000000000000".into(),
             destination_path: "D:/Ingest/A".into(),
             sort_mode: "camera_interval".into(),
+            capture_time_basis: CaptureTimeBasis::CameraRecorded,
             interval_minutes: Some(1),
             custom_directory_fields: vec![
                 CustomDirectoryField::new("Photographer", "Ari").expect("field")
@@ -1269,6 +1296,111 @@ mod tests {
                 .expect("near"),
             None
         );
+    }
+
+    #[test]
+    fn schema_13_marker_profiles_migrate_to_camera_recorded_without_losing_preferences() {
+        let store = LocalStore {
+            connection: Connection::open_in_memory().expect("legacy database"),
+        };
+        store
+            .connection
+            .execute_batch(
+                "CREATE TABLE marker_ingest_profile (
+                marker_token TEXT PRIMARY KEY,
+                destination_path TEXT NOT NULL,
+                sort_mode TEXT NOT NULL,
+                interval_minutes INTEGER,
+                custom_directory_fields_json TEXT NOT NULL DEFAULT '[]',
+                destination_depth_order_json TEXT NOT NULL DEFAULT '[]',
+                auto_ingest_enabled INTEGER NOT NULL,
+                auto_format_enabled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+             INSERT INTO marker_ingest_profile(
+                marker_token, destination_path, sort_mode, interval_minutes,
+                auto_ingest_enabled, auto_format_enabled
+             ) VALUES ('legacy-marker', 'D:/Ingest/Legacy', 'camera_interval', 60, 1, 0);",
+            )
+            .expect("schema 13 marker profile");
+        store.migrate().expect("add capture basis column");
+        store.migrate().expect("idempotent migration");
+        let profile = store
+            .marker_ingest_profile("legacy-marker")
+            .expect("load migrated profile")
+            .expect("legacy profile retained");
+        assert_eq!(profile.capture_time_basis, CaptureTimeBasis::CameraRecorded);
+        assert_eq!(profile.destination_path, "D:/Ingest/Legacy");
+        assert_eq!(profile.sort_mode, "camera_interval");
+        assert_eq!(profile.interval_minutes, Some(60));
+        assert!(profile.auto_ingest_enabled);
+        assert!(!profile.auto_format_enabled);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT MAX(version) FROM schema_migration", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .expect("migration version"),
+            14
+        );
+        assert!(store.connection.execute(
+            "UPDATE marker_ingest_profile SET capture_time_basis = 'host_guess' WHERE marker_token = 'legacy-marker'",
+            [],
+        ).is_err(), "only the two explicit capture-time bases may be persisted");
+        assert_eq!(
+            store
+                .marker_ingest_profile("legacy-marker")
+                .expect("profile after rejected update")
+                .expect("profile")
+                .capture_time_basis,
+            CaptureTimeBasis::CameraRecorded
+        );
+    }
+
+    #[test]
+    fn a_computer_local_marker_profile_survives_update_and_database_reopen() {
+        let root =
+            std::env::temp_dir().join(format!("marker-capture-basis-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temporary database directory");
+        let path = root.join("profiles.sqlite");
+        let mut profile = MarkerIngestProfile {
+            marker_token: "MIT1:00000000-0000-4000-8000-000000000042".into(),
+            destination_path: "D:/Ingest/ComputerLocal".into(),
+            sort_mode: "camera_interval".into(),
+            capture_time_basis: CaptureTimeBasis::CameraRecorded,
+            interval_minutes: Some(60),
+            custom_directory_fields: Vec::new(),
+            destination_depth_order: vec![
+                DestinationDepthSegment::CameraModel,
+                DestinationDepthSegment::CaptureDay,
+                DestinationDepthSegment::CaptureInterval,
+            ],
+            auto_ingest_enabled: true,
+            auto_format_enabled: false,
+        };
+        {
+            let mut store = LocalStore::open(&path).expect("initial store");
+            store
+                .save_marker_ingest_profile(&profile)
+                .expect("initial camera-based profile");
+            profile.capture_time_basis = CaptureTimeBasis::ComputerLocal;
+            store
+                .save_marker_ingest_profile(&profile)
+                .expect("updated computer-local profile");
+        }
+        {
+            let store = LocalStore::open(&path).expect("reopened store");
+            assert_eq!(
+                store
+                    .marker_ingest_profile(&profile.marker_token)
+                    .expect("reloaded profile"),
+                Some(profile)
+            );
+        }
+        std::fs::remove_dir_all(root).expect("temporary database cleanup");
     }
 
     #[test]

@@ -966,13 +966,21 @@ fn validate_destination_relative_path(path: &Path) -> Result<(), IngestError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64};
 
     /// One uncompressed grayscale pixel in a baseline little-endian TIFF,
     /// with a real Exif sub-IFD rather than mocked metadata-reader results.
-    fn exif_hour_range_tiff(capture_time: &str, pixel: u8) -> Vec<u8> {
+    pub(crate) fn exif_hour_range_tiff(capture_time: &str, pixel: u8) -> Vec<u8> {
+        exif_hour_range_tiff_with_offset(capture_time, Some("+08:00"), pixel)
+    }
+
+    pub(crate) fn exif_hour_range_tiff_with_offset(
+        capture_time: &str,
+        embedded_offset: Option<&str>,
+        pixel: u8,
+    ) -> Vec<u8> {
         fn append_ascii(bytes: &mut Vec<u8>, value: &str) -> (u32, u32) {
             if !bytes.len().is_multiple_of(2) {
                 bytes.push(0);
@@ -1002,7 +1010,7 @@ mod tests {
         bytes[..8].copy_from_slice(b"II*\0\x08\0\0\0");
         let (make_length, make_offset) = append_ascii(&mut bytes, "Sony");
         let (capture_length, capture_offset) = append_ascii(&mut bytes, capture_time);
-        let (offset_length, offset_offset) = append_ascii(&mut bytes, "+08:00");
+        let original_offset = embedded_offset.map(|offset| append_ascii(&mut bytes, offset));
         let (serial_length, serial_offset) = append_ascii(&mut bytes, "hour-range-camera-01");
         if !bytes.len().is_multiple_of(2) {
             bytes.push(0);
@@ -1033,18 +1041,19 @@ mod tests {
                 (0x8769, 4, 1, exif_ifd_offset as u32),
             ],
         );
-        write_ifd(
-            &mut bytes,
-            exif_ifd_offset,
-            &[
-                (0x9000, 7, 4, u32::from_le_bytes(*b"0231")),
-                (0x9003, 2, capture_length, capture_offset),
-                (0x9011, 2, offset_length, offset_offset),
-                (0xa000, 7, 4, u32::from_le_bytes(*b"0100")),
-                (0xa001, 3, 1, 1), // ColorSpace: sRGB
-                (0xa431, 2, serial_length, serial_offset),
-            ],
-        );
+        let mut exif_entries = vec![
+            (0x9000, 7, 4, u32::from_le_bytes(*b"0231")),
+            (0x9003, 2, capture_length, capture_offset),
+        ];
+        if let Some((length, offset)) = original_offset {
+            exif_entries.push((0x9011, 2, length, offset));
+        }
+        exif_entries.extend([
+            (0xa000, 7, 4, u32::from_le_bytes(*b"0100")),
+            (0xa001, 3, 1, 1), // ColorSpace: sRGB
+            (0xa431, 2, serial_length, serial_offset),
+        ]);
+        write_ifd(&mut bytes, exif_ifd_offset, &exif_entries);
         bytes
     }
 
@@ -1121,7 +1130,7 @@ mod tests {
                 .expect("fixture modification handle")
                 .set_times(fs::FileTimes::new().set_modified(modified_time))
                 .expect("deliberately different modification time");
-            let metadata = inspect(&path);
+            let metadata = inspect(&path).expect("read capture metadata");
             assert_eq!(metadata.make, "Sony");
             assert_eq!(metadata.model, "FX3");
             assert_eq!(
@@ -1163,6 +1172,7 @@ mod tests {
             max_workers: 2,
             sort_mode: IngestSortMode::CameraInterval,
             interval_minutes: Some(60),
+            capture_time_basis: crate::organization::CaptureTimeBasis::CameraRecorded,
             custom_directory_fields: Vec::new(),
             destination_depth_order: None,
             auto_ingest_triggered: false,
@@ -1348,6 +1358,178 @@ mod tests {
             fixtures.len() + 1
         );
         fs::remove_dir_all(root).expect("temporary fixture cleanup");
+    }
+
+    #[test]
+    fn selected_time_basis_copies_exif_media_across_offsets_and_calendar_boundaries() {
+        use crate::metadata::{inspect, CaptureTimeSource};
+        use crate::organization::CaptureTimeBasis;
+        use crate::{
+            execute_prepared_ingest, prepare_verified_ingest, IdentityConfidence, IngestSortMode,
+            VerifiedIngestRequest,
+        };
+        use chrono::{FixedOffset, NaiveDateTime, TimeZone, Timelike};
+        use std::collections::BTreeMap;
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let captures = [
+            ("2026:12:31 23:30:00", Some("+14:00")),
+            ("2026:12:31 23:30:00", Some("-12:00")),
+            ("2026:12:31 13:42:00", Some("+05:45")),
+            ("2026:12:31 13:42:00", Some("+08:45")),
+            ("2026:12:31 13:42:00", Some("-03:30")),
+            ("2026:12:31 13:42:00", Some("-09:30")),
+            ("2026:12:31 00:30:00", Some("+12:45")),
+            ("2026:12:31 13:42:00", None),
+        ];
+        for basis in [
+            CaptureTimeBasis::CameraRecorded,
+            CaptureTimeBasis::ComputerLocal,
+        ] {
+            let root = std::env::temp_dir().join(format!("ingest-time-basis-{}", Uuid::new_v4()));
+            let source = root.join("source");
+            let destination = root.join("destination");
+            fs::create_dir_all(source.join("DCIM")).expect("source fixture");
+            let modified = UNIX_EPOCH + Duration::from_secs(1_577_923_200);
+            let mut expected = BTreeMap::new();
+            for (index, (recorded, offset)) in captures.iter().enumerate() {
+                let relative = PathBuf::from("DCIM").join(format!("ZONE{index:02}.TIF"));
+                let bytes = exif_hour_range_tiff_with_offset(recorded, *offset, index as u8);
+                let path = source.join(&relative);
+                fs::write(&path, &bytes).expect("EXIF fixture");
+                OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .expect("fixture handle")
+                    .set_times(fs::FileTimes::new().set_modified(modified))
+                    .expect("source clock fixture");
+                let wall_clock = NaiveDateTime::parse_from_str(recorded, "%Y:%m:%d %H:%M:%S")
+                    .expect("recorded wall clock");
+                let camera_offset = offset.map_or(FixedOffset::east_opt(0).unwrap(), |value| {
+                    let seconds = (value[1..3].parse::<i32>().unwrap() * 60
+                        + value[4..6].parse::<i32>().unwrap())
+                        * 60;
+                    FixedOffset::east_opt(if value.starts_with('-') {
+                        -seconds
+                    } else {
+                        seconds
+                    })
+                    .unwrap()
+                });
+                let capture = camera_offset
+                    .from_local_datetime(&wall_clock)
+                    .single()
+                    .expect("fixed-offset capture");
+                let projected = if basis == CaptureTimeBasis::ComputerLocal && offset.is_some() {
+                    capture.with_timezone(&chrono::Local).fixed_offset()
+                } else {
+                    capture
+                };
+                let suffix = if offset.is_some() {
+                    projected.format("%z").to_string()
+                } else {
+                    "-offset-unknown".into()
+                };
+                let day = format!("{}T000000{suffix}", projected.format("%Y%m%d"));
+                let hour = format!(
+                    "{:02}00-{:02}00{suffix}",
+                    projected.hour(),
+                    projected.hour() + 1
+                );
+                let metadata = inspect(&path).expect("real metadata read");
+                assert_eq!(metadata.capture_offset_known, offset.is_some());
+                assert_eq!(metadata.capture_time.naive_local(), wall_clock);
+                assert_eq!(
+                    metadata.capture_time_source,
+                    if offset.is_some() {
+                        CaptureTimeSource::ExifOriginalWithOffset
+                    } else {
+                        CaptureTimeSource::ExifOriginalWithoutOffset
+                    }
+                );
+                expected.insert(relative, (bytes, day, hour));
+            }
+            let prepared = prepare_verified_ingest(
+                VerifiedIngestRequest {
+                    operation_id: None,
+                    source_root: source.to_string_lossy().into(),
+                    destination_root: destination.to_string_lossy().into(),
+                    source_medium_key: "session:time-basis-fixture".into(),
+                    source_identity_confidence: IdentityConfidence::Unresolved,
+                    source_generation: 1,
+                    max_workers: 2,
+                    sort_mode: IngestSortMode::CameraInterval,
+                    interval_minutes: Some(60),
+                    capture_time_basis: basis,
+                    custom_directory_fields: Vec::new(),
+                    destination_depth_order: None,
+                    auto_ingest_triggered: false,
+                },
+                Uuid::new_v4().to_string(),
+            )
+            .expect("production time-basis plan");
+            let planned = prepared
+                .files
+                .iter()
+                .map(|file| file.destination_relative_path.clone())
+                .collect::<Vec<_>>();
+            let completed =
+                execute_prepared_ingest(prepared, Arc::new(AtomicBool::new(false)), None)
+                    .expect("verified time-basis copy");
+            assert_eq!(completed.copies.len(), captures.len());
+            assert_eq!(
+                completed
+                    .copies
+                    .iter()
+                    .map(|file| file.destination_relative_path.clone())
+                    .collect::<Vec<_>>(),
+                planned
+            );
+            for copy in &completed.copies {
+                let (bytes, day, hour) = expected
+                    .get(&copy.source_relative_path)
+                    .expect("source expectation");
+                let components = copy
+                    .destination_relative_path
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                assert!(components[0].starts_with("FX3__"));
+                assert_eq!(&components[1], day);
+                assert_eq!(&components[2], hour);
+                assert_eq!(
+                    fs::read(&copy.final_path).expect("destination readback"),
+                    *bytes
+                );
+                assert_eq!(copy.digest_hex, blake3::hash(bytes).to_hex().to_string());
+                assert_eq!(
+                    fs::read(source.join(&copy.source_relative_path)).expect("source preserved"),
+                    *bytes
+                );
+                assert_eq!(
+                    fs::metadata(source.join(&copy.source_relative_path))
+                        .unwrap()
+                        .modified()
+                        .unwrap(),
+                    modified
+                );
+            }
+            let receipt: IngestReceipt = serde_json::from_slice(
+                &fs::read(
+                    destination
+                        .join(".media-ingest-receipts")
+                        .join(&completed.summary.receipt_name),
+                )
+                .expect("receipt bytes"),
+            )
+            .expect("receipt JSON");
+            assert_eq!(receipt.files.len(), captures.len());
+            assert_eq!(
+                receipt.manifest_root_blake3,
+                manifest_root(&completed.copies)
+            );
+            fs::remove_dir_all(root).expect("controlled fixture cleanup");
+        }
     }
 
     #[test]

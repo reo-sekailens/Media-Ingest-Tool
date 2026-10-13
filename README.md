@@ -27,7 +27,7 @@ on the card. **Save configuration** applies the reviewed settings; Cancel or
 Escape discards the draft. The workspace shows the saved summary and an
 **Edit configuration** action.
 
-**EXIF hour** groups media by its embedded capture hour. For example, a 13:42
+**EXIF hour** groups media by capture hour. With Camera time selected, a 13:42
 capture with a +08:00 offset goes into
 `<camera>/20261013T000000+0800/1300-1400+0800/<filename>`. The start is included
 and the end is excluded, so a 14:00 capture goes into `1400-1500+0800`. The last
@@ -35,6 +35,20 @@ hour ends at `2400`; midnight begins a new date folder. Custom intervals use the
 same range naming. Missing offsets remain explicit, and unreadable capture
 metadata uses the source modification timestamp. Existing files and frozen
 recovery paths are not renamed by this new-plan naming change.
+
+Choose **Camera time** (default) to keep the recorded capture clock, or
+**Computer local time** to convert known capture instants to the computer's
+local timezone at the capture date, including daylight saving time. Captures
+without an offset keep their recorded clock and use `offset-unknown` in either
+mode. Unsupported metadata falls back to the source modification time in UTC;
+Computer local time converts that known instant. No capture or fallback time
+means time-based planning fails instead of inventing the ingest time.
+
+Before using capture-time folders, synchronize the camera and computer clocks
+and check their date, time, timezone, and daylight saving settings. The dialog
+and workspace show this warning. The choice is saved with the card's local
+profile and applies to preview, manual ingest, and future automatic ingest.
+Existing files and recovery plans retain their saved paths.
 
 Card persistence uses the desktop app's existing mutable marker registration.
 Automatic ingest and automatic format require persistence and remain explicit

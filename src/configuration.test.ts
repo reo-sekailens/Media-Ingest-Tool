@@ -10,6 +10,7 @@ import {
   resolveSortRequest,
   validateConfiguration,
   validateConfigurationStep,
+  type CaptureTimeBasis,
   type DestinationDepthSegment,
 } from "./configuration";
 
@@ -18,6 +19,7 @@ describe("configuration drafts", () => {
     expect(createConfiguration()).toEqual({
       destinationPath: "",
       sortPreset: "exif_day",
+      captureTimeBasis: "camera_recorded",
       customIntervalMinutes: "30",
       customDirectoryFields: [],
       destinationDepthOrder: [],
@@ -29,6 +31,37 @@ describe("configuration drafts", () => {
     expect(
       validateConfiguration(createConfiguration({ destinationPath: "D:/Ingest" })),
     ).toBeNull();
+  });
+
+  test.each(["camera_recorded", "computer_local"] as const)(
+    "preserves %s through draft creation and cloning without changing saved settings",
+    (captureTimeBasis) => {
+      const saved = createConfiguration({
+        destinationPath: "D:/Ingest",
+        captureTimeBasis,
+      });
+      const draft = cloneConfiguration(saved);
+      expect(draft.captureTimeBasis).toBe(captureTimeBasis);
+      draft.captureTimeBasis =
+        captureTimeBasis === "computer_local" ? "camera_recorded" : "computer_local";
+      expect(saved.captureTimeBasis).toBe(captureTimeBasis);
+    },
+  );
+
+  test("legacy settings default to camera time and malformed time bases cannot save", () => {
+    const legacy = createConfiguration({
+      destinationPath: "D:/Ingest",
+      sortPreset: "exif_hour",
+    });
+    expect(legacy.captureTimeBasis).toBe("camera_recorded");
+    expect(validateConfiguration(legacy)).toBeNull();
+    const malformed = { ...legacy, captureTimeBasis: "system_now" as CaptureTimeBasis };
+    expect(validateConfigurationStep(malformed, "organization")).toBe(
+      "Choose camera time or computer local time.",
+    );
+    expect(validateConfiguration(malformed)).toBe(
+      "Choose camera time or computer local time.",
+    );
   });
 
   test("independent defaults and clones keep canceled edits out of saved state", () => {

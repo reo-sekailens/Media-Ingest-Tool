@@ -32,6 +32,21 @@ Persist device observations, exact identity evidence, per-device destination rul
 - Database migrations are tested from every checked-in schema version, including rollback/backup recovery behavior.
 - Exported receipts contain source identity evidence, file paths, sizes, BLAKE3 digests, timestamps, outcomes, and app/schema versions without leaking unrelated host data.
 
+## 2026-10-13 capture-time preference
+
+Schema 14 adds a constrained `capture_time_basis` column to the marker ingest
+profile, keyed by its existing token. Existing schema-13 rows default to
+`camera_recorded`; `computer_local` is the other permitted value. Rust saves,
+reloads, and returns the typed choice to the UI for future-mount automation.
+The on-card marker remains a compact token/witness; preference data stays in the
+local SQLite store. Session-only saves leave persisted settings intact.
+
+Migration tests cover existing preference retention, idempotence, invalid values,
+and saving/updating/reopening a computer-local profile in a temporary database.
+Legacy JSON requests default to camera time. Existing recovery paths are not
+replanned when the preference or computer timezone changes. Physical-card
+persistence and platform-specific database recovery still need separate proof.
+
 ## Verification evidence
 
 - Rust migration and repository tests using a temporary database.

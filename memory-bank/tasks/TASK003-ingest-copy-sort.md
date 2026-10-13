@@ -12,10 +12,10 @@
   counters and terminal lifecycle events remain authoritative.
 - **Timestamp folders:** The camera-day level uses a portable ISO 8601 basic
   timestamp (`YYYYMMDDT000000+HHMM`); its interval child uses the capture-clock
-  range and offset (`HHMM-HHMM+HHMM`, for example `1300-1400+0800`). Both are built from the aware EXIF capture
-  offset. A naive EXIF timestamp preserves its recorded
-  camera wall clock for grouping and uses an `-offset-unknown` label until an
-  explicit camera timezone policy exists.
+  range and offset (`HHMM-HHMM+HHMM`, for example `1300-1400+0800`). Both use the
+  selected Camera time (default) or Computer local time basis. A naive EXIF
+  timestamp preserves its recorded camera wall clock for grouping and uses an
+  `-offset-unknown` label in either mode.
 - **Priority:** P0
 - **Owner:** Unassigned
 - **Depends on:** TASK001 (Tauri/Rust/React/TypeScript/Tailwind foundation), TASK002 (storage discovery and stable device/volume identity), TASK007 (local state and destination/camera profiles)
@@ -169,6 +169,28 @@ Ship conservative defaults, expose advanced overrides only after tests, and stor
 - Tune by device/destination class without using make/model strings as identity.
 
 ## Acceptance criteria
+
+### 2026-10-13 capture clock selection
+
+CameraRecorded is the backward-compatible default. ComputerLocal projects a
+known instant using the computer timezone at capture time, including DST; it
+never uses the host's current offset. Unknown-offset EXIF clocks stay recorded
+and offset-unknown in either mode. Only OffsetTimeOriginal can establish the
+DateTimeOriginal offset, even if the parser supplied another tag's offset.
+Original metadata is retained. Source modified time is an explicit UTC fallback
+which can be converted in ComputerLocal mode. A missing required fallback time
+propagates an error; OriginalTree uses no metadata clock. Recovery paths remain
+frozen. New plans depend on the OS timezone database; pinned IANA/project-zone
+policies and a broad real-camera/video corpus remain separate work.
+
+Local isolated staged verification passes Rust fmt, strict all-target Clippy,
+and all-target native tests (126 passed, seven hardware cases ignored). Actual
+TIFF parsing covers 2,879 minute offsets and unrelated/malformed tags. Projection
+covers every civil minute offset and an injected repeated DST hour. Native copy
+uses eight real EXIF files for both choices, asserting paths, unchanged source
+bytes/mtime, independent BLAKE3 readback, and matching receipts. OriginalTree
+clock independence, SQLite migration/reopen, and frozen recovery are tested.
+These checks do not certify a physical camera or broad video/RAW metadata corpus.
 
 ### Recent implementation evidence
 

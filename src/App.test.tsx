@@ -214,6 +214,7 @@ test("loads saved native organization and automation before editing", async () =
   );
   advance();
   expect(within(dialog).getByLabelText("Custom interval minutes")).toHaveValue(37);
+  expect(within(dialog).getByRole("radio", { name: "Camera time" })).toBeChecked();
   expect(within(dialog).getByLabelText("Custom folder 1 value")).toHaveValue("Ari");
   advance();
   expect(
@@ -281,6 +282,7 @@ test("native save errors retain the reviewed draft and retry sends the complete 
       destinationPath: "D:\\Ingest\\Configured",
       sortMode: "camera_interval",
       intervalMinutes: 45,
+      captureTimeBasis: "camera_recorded",
       customDirectoryFields: [{ label: "", value: "Ari" }],
       destinationDepthOrder: [
         { kind: "custom_field", index: 0 },
@@ -321,94 +323,369 @@ test("native save errors retain the reviewed draft and retry sends the complete 
   );
 });
 
-test("saved EXIF-hour settings reach native preview and manual copy as sixty-minute intervals", async () => {
-  const { state, handler } = nativeConfigurationRuntime();
-  const samplePath = "FX3__fixture/20260823T000000+0800/1300-1400+0800/PHOTO.JPG";
-  tauri.invoke.mockImplementation(
-    (command: string, args?: { request?: Record<string, unknown> }) => {
-      if (command === "register_card_marker") {
-        state.profile = {
-          ...args?.request,
-          registered: true,
-          markerStatus: "recognized",
-        };
-        return Promise.resolve({ data: state.profile, error: null });
-      }
-      if (command === "preview_verified_ingest") {
-        return Promise.resolve({
-          data: {
-            operationId: args?.request?.operationId,
-            fileCount: 1,
-            totalBytes: 512,
-            sampleDestinationPaths: [samplePath],
-          },
-          error: null,
-        });
-      }
-      if (command === "start_verified_ingest")
-        return Promise.resolve({
-          data: null,
-          error: { message: "Copy fixture intercepted." },
-        });
-      return handler(command);
-    },
-  );
-  render(<App />);
-  await screen.findByRole("heading", { name: "hardware:config-a" });
-  const dialog = await openConfigurationDialog();
-  fireEvent.change(within(dialog).getByLabelText("Destination directory"), {
-    target: { value: "D:\\Ingest\\Hourly" },
-  });
-  advance();
-  fireEvent.click(within(dialog).getByRole("button", { name: "EXIF hour" }));
-  advance();
-  advance();
-  fireEvent.click(within(dialog).getByRole("button", { name: "Save configuration" }));
-  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-  const settings = {
+test("native computer-time settings rehydrate and cancelled clock edits stay isolated", async () => {
+  const { state } = nativeConfigurationRuntime();
+  state.profile = {
+    registered: true,
+    destinationPath: "D:\\LocalClock",
     sortMode: "camera_interval",
     intervalMinutes: 60,
+    captureTimeBasis: "computer_local",
     customDirectoryFields: [],
     destinationDepthOrder: [
       { kind: "camera_model" },
       { kind: "capture_day" },
       { kind: "capture_interval" },
     ],
+    autoIngestEnabled: false,
+    autoFormatEnabled: false,
+    markerStatus: "recognized",
   };
-  expect(tauri.invoke).toHaveBeenCalledWith("register_card_marker", {
-    request: {
-      sourceMediumKey: "hardware:config-a",
-      destinationPath: "D:\\Ingest\\Hourly",
-      ...settings,
-      autoIngestEnabled: false,
-      autoFormatEnabled: false,
-    },
-  });
+  render(<App />);
+  await screen.findByText("Time basis: Computer local time");
+  const dialog = await openConfigurationDialog();
+  advance();
   expect(
-    tauri.invoke.mock.calls.some(([command]) => command === "start_verified_ingest"),
+    within(dialog).getByRole("radio", { name: "Computer local time" }),
+  ).toBeChecked();
+  fireEvent.click(within(dialog).getByRole("radio", { name: "Camera time" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.getByText("Time basis: Computer local time")).toBeVisible();
+  const reopened = await openConfigurationDialog();
+  advance();
+  expect(
+    within(reopened).getByRole("radio", { name: "Computer local time" }),
+  ).toBeChecked();
+  expect(
+    tauri.invoke.mock.calls.some(([command]) => command === "register_card_marker"),
   ).toBe(false);
-  fireEvent.click(screen.getByRole("button", { name: "Preview Organization" }));
-  expect(await screen.findByText(samplePath)).toBeVisible();
-  const previewRequest = tauri.invoke.mock.calls.find(
-    ([command]) => command === "preview_verified_ingest",
-  )?.[1].request;
-  expect(previewRequest).toMatchObject({
-    ...settings,
-    destinationRoot: "D:\\Ingest\\Hourly",
-    sourceMediumKey: "hardware:config-a",
-    sourceGeneration: 1,
-    autoIngestTriggered: false,
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Start Verified Ingest" }));
-  await waitFor(() =>
-    expect(tauri.invoke).toHaveBeenCalledWith(
-      "start_verified_ingest",
-      expect.objectContaining({
-        request: expect.objectContaining({ ...previewRequest }),
-      }),
-    ),
-  );
 });
+
+test.each(["camera_recorded", "computer_local"] as const)(
+  "saved EXIF-hour settings use %s for registration, preview, and manual copy",
+  async (captureTimeBasis) => {
+    const { state, handler } = nativeConfigurationRuntime();
+    const samplePath = "FX3__fixture/20260823T000000+0800/1300-1400+0800/PHOTO.JPG";
+    tauri.invoke.mockImplementation(
+      (command: string, args?: { request?: Record<string, unknown> }) => {
+        if (command === "register_card_marker") {
+          state.profile = {
+            ...args?.request,
+            registered: true,
+            markerStatus: "recognized",
+          };
+          return Promise.resolve({ data: state.profile, error: null });
+        }
+        if (command === "preview_verified_ingest") {
+          return Promise.resolve({
+            data: {
+              operationId: args?.request?.operationId,
+              fileCount: 1,
+              totalBytes: 512,
+              sampleDestinationPaths: [samplePath],
+            },
+            error: null,
+          });
+        }
+        if (command === "start_verified_ingest")
+          return Promise.resolve({
+            data: null,
+            error: { message: "Copy fixture intercepted." },
+          });
+        return handler(command);
+      },
+    );
+    render(<App />);
+    await screen.findByRole("heading", { name: "hardware:config-a" });
+    const dialog = await openConfigurationDialog();
+    fireEvent.change(within(dialog).getByLabelText("Destination directory"), {
+      target: { value: "D:\\Ingest\\Hourly" },
+    });
+    advance();
+    fireEvent.click(within(dialog).getByRole("button", { name: "EXIF hour" }));
+    fireEvent.click(
+      within(dialog).getByRole("radio", {
+        name:
+          captureTimeBasis === "computer_local" ? "Computer local time" : "Camera time",
+      }),
+    );
+    advance();
+    advance();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save configuration" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const settings = {
+      sortMode: "camera_interval",
+      intervalMinutes: 60,
+      captureTimeBasis,
+      customDirectoryFields: [],
+      destinationDepthOrder: [
+        { kind: "camera_model" },
+        { kind: "capture_day" },
+        { kind: "capture_interval" },
+      ],
+    };
+    expect(tauri.invoke).toHaveBeenCalledWith("register_card_marker", {
+      request: {
+        sourceMediumKey: "hardware:config-a",
+        destinationPath: "D:\\Ingest\\Hourly",
+        ...settings,
+        autoIngestEnabled: false,
+        autoFormatEnabled: false,
+      },
+    });
+    expect(
+      tauri.invoke.mock.calls.some(([command]) => command === "start_verified_ingest"),
+    ).toBe(false);
+    expect(
+      screen.getByText(
+        `Time basis: ${captureTimeBasis === "computer_local" ? "Computer local time" : "Camera time"}`,
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("note", { name: "Synchronize camera and computer clocks" }),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Preview Organization" }));
+    expect(await screen.findByText(samplePath)).toBeVisible();
+    const previewRequest = tauri.invoke.mock.calls.find(
+      ([command]) => command === "preview_verified_ingest",
+    )?.[1].request;
+    expect(previewRequest).toMatchObject({
+      ...settings,
+      destinationRoot: "D:\\Ingest\\Hourly",
+      sourceMediumKey: "hardware:config-a",
+      sourceGeneration: 1,
+      autoIngestTriggered: false,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start Verified Ingest" }));
+    await waitFor(() =>
+      expect(tauri.invoke).toHaveBeenCalledWith(
+        "start_verified_ingest",
+        expect.objectContaining({
+          request: expect.objectContaining({ ...previewRequest }),
+        }),
+      ),
+    );
+  },
+);
+
+test.each(["success", "error", "rejection"] as const)(
+  "ignores a pending camera-time preview's %s after saving computer time",
+  async (outcome) => {
+    const { handler } = nativeConfigurationRuntime();
+    let completePreview!: (result: unknown) => void;
+    let failPreview!: (error: Error) => void;
+    const pendingPreview = new Promise((resolve, reject) => {
+      completePreview = resolve;
+      failPreview = reject;
+    });
+    tauri.invoke.mockImplementation((command: string) => {
+      if (command === "preview_verified_ingest") return pendingPreview;
+      if (command === "start_verified_ingest")
+        return Promise.resolve({ data: null, error: { message: "Copy intercepted." } });
+      return handler(command);
+    });
+    render(<App />);
+    await screen.findByRole("heading", { name: "hardware:config-a" });
+    await saveSession("D:\\Ingest\\Pending");
+    fireEvent.click(screen.getByRole("button", { name: "Preview Organization" }));
+    const pendingRequest = tauri.invoke.mock.calls.find(
+      ([command]) => command === "preview_verified_ingest",
+    )?.[1].request;
+    expect(pendingRequest.captureTimeBasis).toBe("camera_recorded");
+    const dialog = await openConfigurationDialog();
+    advance();
+    fireEvent.click(within(dialog).getByRole("radio", { name: "Computer local time" }));
+    advance();
+    advance();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save configuration" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByText("Time basis: Computer local time")).toBeVisible();
+    await act(async () => {
+      if (outcome === "success") {
+        completePreview({
+          data: {
+            operationId: pendingRequest.operationId,
+            fileCount: 1,
+            totalBytes: 512,
+            sampleDestinationPaths: ["obsolete-camera-hour/1300-1400+0800/PHOTO.JPG"],
+          },
+          error: null,
+        });
+      } else if (outcome === "error") {
+        completePreview({
+          data: null,
+          error: { message: "Obsolete camera preview failed." },
+        });
+      } else {
+        failPreview(new Error("Transport rejected the old preview."));
+      }
+    });
+    expect(screen.queryByText(/obsolete-camera-hour/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Obsolete camera preview failed."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("The desktop service could not preview this organization."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Planning destination paths/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start Verified Ingest" }));
+    await waitFor(() =>
+      expect(tauri.invoke).toHaveBeenCalledWith(
+        "start_verified_ingest",
+        expect.objectContaining({
+          request: expect.objectContaining({ captureTimeBasis: "computer_local" }),
+        }),
+      ),
+    );
+    const copyRequest = tauri.invoke.mock.calls.find(
+      ([command]) => command === "start_verified_ingest",
+    )?.[1].request;
+    expect(copyRequest.operationId).not.toBe(pendingRequest.operationId);
+  },
+);
+
+test.each(["success", "rejection"] as const)(
+  "the latest preview keeps its paths and operation ID when an older request returns %s",
+  async (outcome) => {
+    const { handler } = nativeConfigurationRuntime();
+    let resolveOld!: (result: unknown) => void;
+    let rejectOld!: (error: Error) => void;
+    const oldPreview = new Promise((resolve, reject) => {
+      resolveOld = resolve;
+      rejectOld = reject;
+    });
+    let previewCount = 0;
+    tauri.invoke.mockImplementation(
+      (command: string, args?: { request?: Record<string, unknown> }) => {
+        if (command === "preview_verified_ingest") {
+          if (++previewCount === 1) return oldPreview;
+          return Promise.resolve({
+            data: {
+              operationId: args?.request?.operationId,
+              fileCount: 1,
+              totalBytes: 512,
+              sampleDestinationPaths: ["latest-preview/PHOTO.JPG"],
+            },
+            error: null,
+          });
+        }
+        if (command === "start_verified_ingest")
+          return Promise.resolve({
+            data: null,
+            error: { message: "Copy intercepted." },
+          });
+        return handler(command);
+      },
+    );
+    render(<App />);
+    await screen.findByRole("heading", { name: "hardware:config-a" });
+    await saveSession("D:\\Ingest\\Latest");
+    fireEvent.click(screen.getByRole("button", { name: "Preview Organization" }));
+    fireEvent.click(screen.getByRole("button", { name: "Preview Organization" }));
+    expect(await screen.findByText("latest-preview/PHOTO.JPG")).toBeVisible();
+    const requests = tauri.invoke.mock.calls
+      .filter(([command]) => command === "preview_verified_ingest")
+      .map(([, args]) => args.request);
+    await act(async () => {
+      if (outcome === "success") {
+        resolveOld({
+          data: {
+            operationId: requests[0].operationId,
+            fileCount: 1,
+            totalBytes: 512,
+            sampleDestinationPaths: ["superseded-preview/PHOTO.JPG"],
+          },
+          error: null,
+        });
+      } else {
+        rejectOld(new Error("Old request failed."));
+      }
+    });
+    expect(screen.getByText("latest-preview/PHOTO.JPG")).toBeVisible();
+    expect(screen.queryByText("superseded-preview/PHOTO.JPG")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("The desktop service could not preview this organization."),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start Verified Ingest" }));
+    await waitFor(() =>
+      expect(tauri.invoke).toHaveBeenCalledWith(
+        "start_verified_ingest",
+        expect.objectContaining({
+          request: expect.objectContaining({ operationId: requests[1].operationId }),
+        }),
+      ),
+    );
+  },
+);
+
+test.each([
+  ["generation", "hardware:config-a", 2, "F:\\"],
+  ["source root", "hardware:config-a", 1, "G:\\"],
+  ["source identity", "hardware:config-b", 1, "F:\\"],
+] as const)(
+  "a saved preview is not adopted after the source %s changes",
+  async (_scope, id, generation, root) => {
+    const { state, handler } = nativeConfigurationRuntime();
+    state.profile = {
+      ...unregisteredProfile(),
+      registered: true,
+      destinationPath: "D:\\Saved",
+      sortMode: "camera_day",
+      captureTimeBasis: "camera_recorded",
+      markerStatus: "recognized",
+    };
+    tauri.invoke.mockImplementation(
+      (command: string, args?: { request?: Record<string, unknown> }) => {
+        if (command === "preview_verified_ingest")
+          return Promise.resolve({
+            data: {
+              operationId: args?.request?.operationId,
+              fileCount: 1,
+              totalBytes: 512,
+              sampleDestinationPaths: ["previous-source/PHOTO.JPG"],
+            },
+            error: null,
+          });
+        if (command === "start_verified_ingest")
+          return Promise.resolve({
+            data: null,
+            error: { message: "Copy intercepted." },
+          });
+        return handler(command);
+      },
+    );
+    render(<App />);
+    await screen.findByText("D:\\Saved");
+    fireEvent.click(screen.getByRole("button", { name: "Preview Organization" }));
+    expect(await screen.findByText("previous-source/PHOTO.JPG")).toBeVisible();
+    const oldRequest = tauri.invoke.mock.calls.find(
+      ([command]) => command === "preview_verified_ingest",
+    )?.[1].request;
+    state.snapshot = { sequence: 2, devices: [nativeSource(id, generation, root)] };
+    await act(async () => events.handlers.get("media-ingest://reactivated")?.());
+    await waitFor(() =>
+      expect(screen.queryByText("previous-source/PHOTO.JPG")).not.toBeInTheDocument(),
+    );
+    await screen.findByText("D:\\Saved");
+    fireEvent.click(screen.getByRole("button", { name: "Start Verified Ingest" }));
+    await waitFor(() =>
+      expect(tauri.invoke).toHaveBeenCalledWith(
+        "start_verified_ingest",
+        expect.objectContaining({
+          request: expect.objectContaining({
+            sourceMediumKey: id,
+            sourceGeneration: generation,
+            sourceRoot: root,
+          }),
+        }),
+      ),
+    );
+    const copyRequest = tauri.invoke.mock.calls.find(
+      ([command]) => command === "start_verified_ingest",
+    )?.[1].request;
+    expect(copyRequest.operationId).not.toBe(oldRequest.operationId);
+  },
+);
 
 test("saving automation applies to future mounts without starting a current-mount copy", async () => {
   const { state, handler } = nativeConfigurationRuntime();
@@ -432,6 +709,7 @@ test("saving automation applies to future mounts without starting a current-moun
     target: { value: "D:\\Future" },
   });
   advance();
+  fireEvent.click(within(dialog).getByRole("radio", { name: "Computer local time" }));
   advance();
   fireEvent.click(within(dialog).getByLabelText("Ingest automatically on mount"));
   advance();
@@ -450,6 +728,7 @@ test("saving automation applies to future mounts without starting a current-moun
           sourceGeneration: 2,
           destinationRoot: "D:\\Future",
           autoIngestTriggered: true,
+          captureTimeBasis: "computer_local",
         }),
       }),
     ),

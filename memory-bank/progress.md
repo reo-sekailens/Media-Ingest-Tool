@@ -2,6 +2,31 @@
 
 ## 2026-10-13
 
+- Added selectable Camera time (default) and Computer local time to card
+  configuration, review, and the applied workspace. A shared warning requires
+  users to check camera/computer date, time, timezone, and DST synchronization.
+  Saved settings reach preview, manual ingest, and future automatic mounts.
+- SQLite schema 14 preserves existing profiles as camera-recorded and persists
+  explicit computer-local choices. Missing EXIF original offsets stay unknown;
+  known instants convert using the host timezone at capture time. Original EXIF
+  clocks never borrow digitization/modification offsets. Time-based planning
+  fails if neither embedded nor source-modified time is available; original-tree
+  planning has no clock dependency, and recovery keeps its frozen paths.
+
+- Guarded organization-preview paths/status by source identity/generation/root,
+  full applied settings, and latest request; saving invalidates pending requests.
+  Obsolete Camera-time results cannot appear under Computer-local settings or
+  supply an old ingest operation ID. Eight deferred/source-scope regressions pass.
+- All 99 frontend tests, TypeScript, ESLint, production build, formatting, and
+  memory-bank validation pass. Isolated staged Rust fmt, strict all-target Clippy,
+  and all-target tests pass: 126 native tests, seven physical cases ignored.
+  Real TIFF EXIF tests exercise 2,879 minute offsets; conversion covers all civil
+  minute offsets and injected historical DST. Eight real files are copied for
+  each basis across fractional/extreme offsets and calendar boundaries, with
+  independent readback and receipt checks. SQLite migration/reopen, OriginalTree
+  clock independence, and frozen recovery pass. Chromium responsive fixtures
+  confirm the two choices, warning, save/cancel/reopen, and no console/overflow
+  issues. Native IPC, physical cards, and a broad camera corpus remain unverified.
 - Changed interval-child names to capture-clock ranges such as
   `1300-1400+0800`, below the separate capture-date folder. Starts are included,
   ends excluded, and final intervals clip at `2400`. Unknown offsets stay

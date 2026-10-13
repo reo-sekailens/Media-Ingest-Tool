@@ -1,5 +1,7 @@
 export type SortPreset = "original_tree" | "exif_day" | "exif_hour" | "exif_custom";
 
+export type CaptureTimeBasis = "camera_recorded" | "computer_local";
+
 export type SortRequest = {
   sortMode: "original_tree" | "camera_day" | "camera_interval";
   intervalMinutes: number | null;
@@ -114,6 +116,7 @@ export function customDirectoryFieldsAreComplete(
 export type ConfigurationDraft = {
   destinationPath: string;
   sortPreset: SortPreset;
+  captureTimeBasis: CaptureTimeBasis;
   customIntervalMinutes: string;
   customDirectoryFields: CustomDirectoryField[];
   destinationDepthOrder: DestinationDepthSegment[];
@@ -128,6 +131,7 @@ export function createConfiguration(
   return {
     destinationPath: partial.destinationPath ?? "",
     sortPreset: partial.sortPreset ?? "exif_day",
+    captureTimeBasis: partial.captureTimeBasis ?? "camera_recorded",
     customIntervalMinutes: partial.customIntervalMinutes ?? "30",
     customDirectoryFields: (partial.customDirectoryFields ?? []).map((field) => ({
       ...field,
@@ -186,6 +190,12 @@ export function validateConfigurationStep(
     return configuration.destinationPath.trim() ? null : "Choose a destination folder.";
   }
   if (step === "organization") {
+    if (
+      configuration.captureTimeBasis !== "camera_recorded" &&
+      configuration.captureTimeBasis !== "computer_local"
+    ) {
+      return "Choose camera time or computer local time.";
+    }
     if (
       !resolveSortRequest(configuration.sortPreset, configuration.customIntervalMinutes)
     ) {

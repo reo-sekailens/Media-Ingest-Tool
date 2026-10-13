@@ -1,13 +1,49 @@
 //! Deterministic camera identity and capture-time destination projection.
 
 use blake3::Hasher;
-use chrono::{DateTime, FixedOffset, Timelike};
+use chrono::{DateTime, FixedOffset, Local, Timelike};
 use std::path::{Component, Path, PathBuf};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
 const MAX_PORTABLE_COMPONENT_BYTES: usize = 120;
 const MAX_CUSTOM_DIRECTORY_FIELDS: usize = 8;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureTimeBasis {
+    #[default]
+    CameraRecorded,
+    ComputerLocal,
+}
+
+/// Resolves only the organization clock. Original capture metadata remains
+/// unchanged, and an unknown camera offset cannot define an instant to convert.
+pub fn resolve_capture_time_basis(
+    capture: DateTime<FixedOffset>,
+    capture_offset_known: bool,
+    basis: CaptureTimeBasis,
+) -> DateTime<FixedOffset> {
+    resolve_capture_time_basis_with_offset(capture, capture_offset_known, basis, |instant| {
+        *instant.with_timezone(&Local).offset()
+    })
+}
+
+/// The offset provider is queried at this capture instant, rather than using
+/// the computer's current offset. Injection keeps timezone/DST tests independent
+/// of the workstation's configured timezone.
+pub fn resolve_capture_time_basis_with_offset(
+    capture: DateTime<FixedOffset>,
+    capture_offset_known: bool,
+    basis: CaptureTimeBasis,
+    computer_offset_at: impl FnOnce(DateTime<FixedOffset>) -> FixedOffset,
+) -> DateTime<FixedOffset> {
+    if basis == CaptureTimeBasis::ComputerLocal && capture_offset_known {
+        capture.with_timezone(&computer_offset_at(capture))
+    } else {
+        capture
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CameraConfidence {
@@ -179,6 +215,47 @@ pub fn destination_relative_path(
     destination_relative_path_with_order(original_relative_path, camera, capture, mode, &[], None)
 }
 
+/// Preserves the source tree and custom-directory order without reading a
+/// capture timestamp or requiring a synthetic camera identity.
+pub fn original_tree_destination_relative_path(
+    original_relative_path: &str,
+    custom_fields: &[CustomDirectoryField],
+    requested_order: Option<&[DestinationDepthSegment]>,
+) -> Result<PathBuf, &'static str> {
+    let original = portable_relative_path(original_relative_path)?;
+    let filename = original.file_name().ok_or("missing filename")?.to_owned();
+    let order = canonical_destination_depth_order(
+        &SortMode::OriginalTree,
+        custom_fields.len(),
+        requested_order,
+    )?;
+    custom_directory_prefix(custom_fields)?;
+
+    let mut destination = PathBuf::new();
+    for segment in order {
+        match segment {
+            DestinationDepthSegment::CustomField { index } => {
+                let field = custom_fields
+                    .get(usize::from(index))
+                    .ok_or("destination depth order references an unknown custom field")?;
+                destination.push(sanitize_destination_component(field.value()));
+            }
+            DestinationDepthSegment::OriginalTree => {
+                if let Some(parent) = original.parent() {
+                    destination.push(parent);
+                }
+            }
+            _ => return Err("destination depth segment is not supported by this sort mode"),
+        }
+    }
+    destination.push(filename);
+    if is_portable_destination_relative_path(&destination) {
+        Ok(destination)
+    } else {
+        Err("unsafe destination projection")
+    }
+}
+
 /// Projects a source file into a portable destination relative path using the
 /// validated destination-depth order. The source filename always remains
 /// final, even when `OriginalTree` is reordered among other directory levels.
@@ -212,6 +289,13 @@ pub fn destination_relative_path_with_order_and_offset(
     custom_fields: &[CustomDirectoryField],
     requested_order: Option<&[DestinationDepthSegment]>,
 ) -> Result<PathBuf, &'static str> {
+    if mode == SortMode::OriginalTree {
+        return original_tree_destination_relative_path(
+            original_relative_path,
+            custom_fields,
+            requested_order,
+        );
+    }
     let original = portable_relative_path(original_relative_path)?;
     let filename = original.file_name().ok_or("missing filename")?.to_owned();
     let order = canonical_destination_depth_order(&mode, custom_fields.len(), requested_order)?;
@@ -488,6 +572,194 @@ fn shorten_component(value: &str) -> String {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn capture_time_basis_defaults_and_serializes_without_changing_existing_profiles() {
+        assert_eq!(
+            CaptureTimeBasis::default(),
+            CaptureTimeBasis::CameraRecorded
+        );
+        assert_eq!(
+            serde_json::to_string(&CaptureTimeBasis::CameraRecorded).expect("camera basis"),
+            "\"camera_recorded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CaptureTimeBasis::ComputerLocal).expect("computer basis"),
+            "\"computer_local\""
+        );
+    }
+
+    #[test]
+    fn camera_calendar_and_ranges_survive_every_numeric_minute_offset() {
+        // Cover every numeric minute offset representable by FixedOffset,
+        // including the complete civil -12:00..+14:00 range and fractions.
+        for offset_minutes in -1_439_i32..=1_439 {
+            let offset = FixedOffset::east_opt(offset_minutes * 60).expect("offset");
+            let magnitude = offset_minutes.abs();
+            let suffix = format!(
+                "{}{:02}{:02}",
+                if offset_minutes < 0 { '-' } else { '+' },
+                magnitude / 60,
+                magnitude % 60,
+            );
+            for (year, month, day, hour, minute, date, range) in [
+                (2025, 12, 31, 23, 59, "20251231", "2300-2400"),
+                (2026, 1, 1, 0, 15, "20260101", "0000-0100"),
+                (2024, 2, 29, 13, 42, "20240229", "1300-1400"),
+            ] {
+                let capture = offset
+                    .with_ymd_and_hms(year, month, day, hour, minute, 59)
+                    .unwrap();
+                let resolved = resolve_capture_time_basis_with_offset(
+                    capture,
+                    true,
+                    CaptureTimeBasis::CameraRecorded,
+                    |_| panic!("camera sorting must not consult the computer timezone"),
+                );
+                assert_eq!(resolved.naive_local(), capture.naive_local());
+                assert_eq!(resolved.offset(), capture.offset());
+                assert_eq!(
+                    capture_day_folder(resolved, true),
+                    format!("{date}T000000{suffix}")
+                );
+                assert_eq!(
+                    capture_interval_folder(resolved, true, 60),
+                    Ok(format!("{range}{suffix}"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn computer_conversion_preserves_the_instant_across_all_civil_minute_offsets() {
+        let wall_clock = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+            .expect("date")
+            .and_hms_opt(0, 15, 59)
+            .expect("time");
+        // Exhaust every source offset and exercise target fractions and both
+        // civil extremes. Expected calendar arithmetic is independent of the
+        // resolver and crosses both year and day boundaries in each direction.
+        for camera_minutes in -720_i32..=840 {
+            let camera_offset = FixedOffset::east_opt(camera_minutes * 60).expect("camera offset");
+            let capture = wall_clock.and_local_timezone(camera_offset).unwrap();
+            for computer_minutes in [-720, -570, -300, -240, 0, 345, 480, 765, 840] {
+                let computer_offset =
+                    FixedOffset::east_opt(computer_minutes * 60).expect("computer offset");
+                let resolved = resolve_capture_time_basis_with_offset(
+                    capture,
+                    true,
+                    CaptureTimeBasis::ComputerLocal,
+                    |instant| {
+                        assert_eq!(instant.timestamp(), capture.timestamp());
+                        computer_offset
+                    },
+                );
+                let expected = wall_clock
+                    + chrono::Duration::minutes(i64::from(computer_minutes - camera_minutes));
+                assert_eq!(resolved.naive_local(), expected);
+                assert_eq!(*resolved.offset(), computer_offset);
+                assert_eq!(resolved.timestamp(), capture.timestamp());
+            }
+        }
+        // Also exhaust the computer offset range, rather than relying only on
+        // the named fractional examples above.
+        let capture = wall_clock
+            .and_local_timezone(FixedOffset::east_opt(345 * 60).expect("camera offset"))
+            .unwrap();
+        for computer_minutes in -720_i32..=840 {
+            let offset = FixedOffset::east_opt(computer_minutes * 60).expect("computer offset");
+            let resolved = resolve_capture_time_basis_with_offset(
+                capture,
+                true,
+                CaptureTimeBasis::ComputerLocal,
+                |_| offset,
+            );
+            assert_eq!(
+                resolved.naive_local(),
+                wall_clock + chrono::Duration::minutes(i64::from(computer_minutes - 345))
+            );
+            assert_eq!(*resolved.offset(), offset);
+        }
+    }
+
+    #[test]
+    fn computer_offset_is_queried_for_each_capture_instant_across_a_repeated_hour() {
+        let transition = Utc.with_ymd_and_hms(2026, 11, 1, 9, 0, 0).unwrap();
+        let camera_offset = FixedOffset::east_opt(8 * 3600).expect("camera offset");
+        let before = Utc
+            .with_ymd_and_hms(2026, 11, 1, 8, 30, 0)
+            .unwrap()
+            .with_timezone(&camera_offset);
+        let after = Utc
+            .with_ymd_and_hms(2026, 11, 1, 9, 30, 0)
+            .unwrap()
+            .with_timezone(&camera_offset);
+        let historical_offset = |instant: DateTime<FixedOffset>| {
+            FixedOffset::west_opt(if instant < transition {
+                7 * 3600
+            } else {
+                8 * 3600
+            })
+            .expect("historical computer offset")
+        };
+        let first = resolve_capture_time_basis_with_offset(
+            before,
+            true,
+            CaptureTimeBasis::ComputerLocal,
+            historical_offset,
+        );
+        let repeated = resolve_capture_time_basis_with_offset(
+            after,
+            true,
+            CaptureTimeBasis::ComputerLocal,
+            historical_offset,
+        );
+        assert_eq!(first.naive_local(), repeated.naive_local());
+        assert_eq!(first.hour(), 1);
+        assert_eq!(first.minute(), 30);
+        assert_eq!(
+            capture_interval_folder(first, true, 60),
+            Ok("0100-0200-0700".into())
+        );
+        assert_eq!(
+            capture_interval_folder(repeated, true, 60),
+            Ok("0100-0200-0800".into())
+        );
+        assert_eq!(first.timestamp(), before.timestamp());
+        assert_eq!(repeated.timestamp(), after.timestamp());
+    }
+
+    #[test]
+    fn unknown_camera_offsets_never_consult_or_claim_the_computer_timezone() {
+        for (year, month, day, hour, minute, expected_day, expected_range) in [
+            (2025, 12, 31, 23, 59, "20251231", "2300-2400"),
+            (2026, 1, 1, 0, 15, "20260101", "0000-0100"),
+            (2024, 2, 29, 13, 42, "20240229", "1300-1400"),
+        ] {
+            let capture = Utc
+                .with_ymd_and_hms(year, month, day, hour, minute, 59)
+                .unwrap()
+                .fixed_offset();
+            for basis in [
+                CaptureTimeBasis::CameraRecorded,
+                CaptureTimeBasis::ComputerLocal,
+            ] {
+                let resolved =
+                    resolve_capture_time_basis_with_offset(capture, false, basis, |_| {
+                        panic!("an unknown camera offset cannot determine a convertible instant")
+                    });
+                assert_eq!(resolved.naive_local(), capture.naive_local());
+                assert_eq!(
+                    capture_day_folder(resolved, false),
+                    format!("{expected_day}T000000-offset-unknown")
+                );
+                assert_eq!(
+                    capture_interval_folder(resolved, false, 60),
+                    Ok(format!("{expected_range}-offset-unknown"))
+                );
+            }
+        }
+    }
 
     #[test]
     fn same_model_distinct_serials_have_distinct_camera_folders() {

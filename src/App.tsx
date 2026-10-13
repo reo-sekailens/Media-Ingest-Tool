@@ -13,6 +13,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal } from "./Modal";
 import { CardConfiguration } from "./CardConfiguration";
+import { CaptureTimeWarning } from "./CaptureTimeWarning";
 import {
   cloneConfiguration,
   createConfiguration,
@@ -22,6 +23,7 @@ import {
   normalizeDestinationDepthOrder,
   resolveSortRequest,
   validateConfiguration,
+  type CaptureTimeBasis,
   type ConfigurationDraft,
   type CustomDirectoryField,
   type DestinationDepthSegment,
@@ -210,6 +212,13 @@ type IngestPlanPreview = {
   sampleDestinationPaths: string[];
 };
 
+type ScopedIngestPlanPreview = {
+  sourceKey: string;
+  configurationSignature: string;
+  plan: IngestPlanPreview | null;
+  label: string;
+};
+
 type RememberedDestination = {
   destinationPath: string | null;
   canRemember: boolean;
@@ -223,6 +232,7 @@ type CardRegistration = {
   destinationPath: string | null;
   sortMode: "original_tree" | "camera_day" | "camera_interval" | null;
   intervalMinutes: number | null;
+  captureTimeBasis?: CaptureTimeBasis;
   customDirectoryFields: CustomDirectoryField[];
   destinationDepthOrder: DestinationDepthSegment[];
   markerStatus: "recognized" | "created" | "unavailable";
@@ -329,6 +339,7 @@ function configurationFromRegistration(profile: CardRegistration): Configuration
             : "exif_custom"
           : "exif_day",
     customIntervalMinutes: String(profile.intervalMinutes ?? 30),
+    captureTimeBasis: profile.captureTimeBasis ?? "camera_recorded",
     customDirectoryFields: profile.customDirectoryFields,
     destinationDepthOrder: profile.destinationDepthOrder,
     persistOnCard: true,
@@ -363,6 +374,10 @@ function App() {
   const [configurations, setConfigurations] = useState<
     Readonly<Record<string, ConfigurationDraft>>
   >({});
+  const appliedConfigurationsRef = useRef(configurations);
+  useEffect(() => {
+    appliedConfigurationsRef.current = configurations;
+  }, [configurations]);
   const [configuration, setConfiguration] = useState<{
     source: DeviceFixture;
     initialValue: ConfigurationDraft;
@@ -394,11 +409,9 @@ function App() {
     Readonly<Record<string, string>>
   >({});
   const [planPreviews, setPlanPreviews] = useState<
-    Readonly<Record<string, IngestPlanPreview>>
+    Readonly<Record<string, ScopedIngestPlanPreview>>
   >({});
-  const [planPreviewLabels, setPlanPreviewLabels] = useState<
-    Readonly<Record<string, string>>
-  >({});
+  const latestPreviewRequests = useRef(new Map<string, string>());
   const [formatReadinessLabels, setFormatReadinessLabels] = useState<
     Readonly<Record<string, string>>
   >({});
@@ -445,6 +458,7 @@ function App() {
   const destination = selectedConfiguration.destinationPath;
   const {
     sortPreset,
+    captureTimeBasis,
     customIntervalMinutes,
     customDirectoryFields,
     destinationDepthOrder,
@@ -461,8 +475,15 @@ function App() {
     configurationLabels[selectedConfigurationKey] ?? "";
   const selectedInventory = selected ? sourceInventories[selected.id] : undefined;
   const selectedInventoryLabel = selected ? sourceInventoryLabels[selected.id] : "";
-  const selectedPlanPreview = selected ? planPreviews[selected.id] : undefined;
-  const selectedPlanPreviewLabel = selected ? planPreviewLabels[selected.id] : "";
+  const selectedConfigurationSignature = JSON.stringify(selectedConfiguration);
+  const cachedPreview = selected ? planPreviews[selected.id] : undefined;
+  const selectedPreviewState =
+    cachedPreview?.sourceKey === selectedConfigurationKey &&
+    cachedPreview.configurationSignature === selectedConfigurationSignature
+      ? cachedPreview
+      : undefined;
+  const selectedPlanPreview = selectedPreviewState?.plan;
+  const selectedPlanPreviewLabel = selectedPreviewState?.label ?? "";
   const selectedFormatReadinessLabel = selected
     ? formatReadinessLabels[selected.id]
     : "";
@@ -579,7 +600,27 @@ function App() {
   }, []);
   const applyNativeSnapshot = useCallback((snapshot: NativeDeviceSnapshot) => {
     const nextDevices = snapshot.devices.map(asFixture);
+    for (const source of liveSourcesRef.current) {
+      if (
+        !nextDevices.some(
+          (device) =>
+            configurationKey(device) === configurationKey(source) && device.ingestable,
+        )
+      ) {
+        latestPreviewRequests.current.delete(source.id);
+      }
+    }
     liveSourcesRef.current = nextDevices;
+    setPlanPreviews((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([, preview]) =>
+          nextDevices.some(
+            (device) =>
+              configurationKey(device) === preview.sourceKey && device.ingestable,
+          ),
+        ),
+      ),
+    );
     setLiveDevices(nextDevices);
     setSelectedId((current) =>
       nextDevices.some((device) => device.id === current)
@@ -776,53 +817,60 @@ function App() {
   }, [selected]);
   const previewIngestPlan = useCallback(async () => {
     if (!selected) return;
+    const sourceKey = configurationKey(selected);
+    const signature = JSON.stringify(selectedConfiguration);
+    const requestId = crypto.randomUUID();
+    latestPreviewRequests.current.set(selected.id, requestId);
+    const isCurrentRequest = () =>
+      latestPreviewRequests.current.get(selected.id) === requestId &&
+      liveSourcesRef.current.some(
+        (device) => configurationKey(device) === sourceKey && device.ingestable,
+      ) &&
+      JSON.stringify(
+        appliedConfigurationsRef.current[sourceKey] ??
+          createConfiguration({ persistOnCard: isTauri() }),
+      ) === signature;
+    const showPreview = (label: string, plan: IngestPlanPreview | null = null) => {
+      if (!isCurrentRequest()) return;
+      setPlanPreviews((current) => ({
+        ...current,
+        [selected.id]: {
+          sourceKey,
+          configurationSignature: signature,
+          plan,
+          label,
+        },
+      }));
+    };
     const sortRequest = resolveSortRequest(sortPreset, customIntervalMinutes);
     if (!sortRequest) {
-      setPlanPreviewLabels((current) => ({
-        ...current,
-        [selected.id]: "Enter a whole custom interval from 1 to 1,440 minutes.",
-      }));
+      showPreview("Enter a whole custom interval from 1 to 1,440 minutes.");
       return;
     }
     if (!customDirectoryFieldsAreComplete(customDirectoryFields)) {
-      setPlanPreviewLabels((current) => ({
-        ...current,
-        [selected.id]: "Complete or remove each custom folder field before previewing.",
-      }));
+      showPreview("Complete or remove each custom folder field before previewing.");
       return;
     }
     if (!isTauri()) {
-      setPlanPreviewLabels((current) => ({
-        ...current,
-        [selected.id]: "Organization preview is available in the desktop application.",
-      }));
+      showPreview("Organization preview is available in the desktop application.");
       return;
     }
     if (!selected.ingestable || !selected.sourceRoot) {
-      setPlanPreviewLabels((current) => ({
-        ...current,
-        [selected.id]: "Insert mounted media before planning its organization.",
-      }));
+      showPreview("Insert mounted media before planning its organization.");
       return;
     }
     if (!destination.trim()) {
-      setPlanPreviewLabels((current) => ({
-        ...current,
-        [selected.id]: "Enter a destination directory before previewing organization.",
-      }));
+      showPreview("Enter a destination directory before previewing organization.");
       return;
     }
-    setPlanPreviewLabels((current) => ({
-      ...current,
-      [selected.id]: "Planning destination paths without copying files…",
-    }));
+    showPreview("Planning destination paths without copying files…");
     try {
       const response = await invoke<{
         data: IngestPlanPreview | null;
         error: { message: string } | null;
       }>("preview_verified_ingest", {
         request: {
-          operationId: crypto.randomUUID(),
+          operationId: requestId,
           sourceRoot: selected.sourceRoot,
           destinationRoot: destination.trim(),
           sourceMediumKey: selected.id,
@@ -831,34 +879,31 @@ function App() {
           maxWorkers: 2,
           sortMode: sortRequest.sortMode,
           intervalMinutes: sortRequest.intervalMinutes,
+          captureTimeBasis,
           customDirectoryFields,
           destinationDepthOrder: selectedDestinationDepthOrder,
           autoIngestTriggered: false,
         },
       });
       if (!response.data) {
-        setPlanPreviewLabels((current) => ({
-          ...current,
-          [selected.id]:
-            response.error?.message ?? "The organization plan did not complete.",
-        }));
+        showPreview(
+          response.error?.message ?? "The organization plan did not complete.",
+        );
         return;
       }
-      setPlanPreviews((current) => ({ ...current, [selected.id]: response.data! }));
-      setPlanPreviewLabels((current) => ({ ...current, [selected.id]: "" }));
+      showPreview("", response.data);
     } catch {
-      setPlanPreviewLabels((current) => ({
-        ...current,
-        [selected.id]: "The desktop service could not preview this organization.",
-      }));
+      showPreview("The desktop service could not preview this organization.");
     }
   }, [
     customDirectoryFields,
     customIntervalMinutes,
     destination,
     selected,
+    selectedConfiguration,
     selectedDestinationDepthOrder,
     sortPreset,
+    captureTimeBasis,
   ]);
   const openConfiguration = useCallback(async () => {
     if (
@@ -980,6 +1025,7 @@ function App() {
               destinationPath: saved.destinationPath,
               sortMode: request.sortMode,
               intervalMinutes: request.intervalMinutes,
+              captureTimeBasis: saved.captureTimeBasis,
               customDirectoryFields: saved.customDirectoryFields,
               destinationDepthOrder: saved.destinationDepthOrder,
               autoIngestEnabled: saved.autoIngestEnabled,
@@ -1005,6 +1051,13 @@ function App() {
           );
           return;
         }
+        // Invalidate pending previews before applying a new configuration, even
+        // when a later save restores the same settings.
+        latestPreviewRequests.current.delete(source.id);
+        appliedConfigurationsRef.current = {
+          ...appliedConfigurationsRef.current,
+          [configurationKey(source)]: saved,
+        };
         setConfigurations((current) => ({
           ...current,
           [configurationKey(source)]: saved,
@@ -1014,7 +1067,6 @@ function App() {
           delete next[source.id];
           return next;
         });
-        setPlanPreviewLabels((current) => ({ ...current, [source.id]: "" }));
         setConfigurationLabels((current) => ({
           ...current,
           [configurationKey(source)]: saved.persistOnCard
@@ -1491,6 +1543,7 @@ function App() {
           maxWorkers: 2,
           sortMode: sortRequest.sortMode,
           intervalMinutes: sortRequest.intervalMinutes,
+          captureTimeBasis,
           customDirectoryFields,
           destinationDepthOrder: selectedDestinationDepthOrder,
           autoIngestTriggered: false,
@@ -1559,6 +1612,7 @@ function App() {
     customIntervalMinutes,
     selectedDestinationDepthOrder,
     sortPreset,
+    captureTimeBasis,
   ]);
   useEffect(() => {
     if (!isTauri()) return;
@@ -1672,6 +1726,7 @@ function App() {
                   profile.sortMode === "camera_interval"
                     ? profile.intervalMinutes
                     : null,
+                captureTimeBasis: profile.captureTimeBasis ?? "camera_recorded",
                 customDirectoryFields: profile.customDirectoryFields ?? [],
                 destinationDepthOrder: profile.destinationDepthOrder?.length
                   ? profile.destinationDepthOrder
@@ -2245,6 +2300,14 @@ function App() {
                   <p className="mt-1 text-sm leading-6 text-slate-700 dark:text-slate-200">
                     {selectedSortLevels.join(" / ")} / Filename
                   </p>
+                  {sortPreset !== "original_tree" ? (
+                    <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">
+                      Time basis:{" "}
+                      {captureTimeBasis === "computer_local"
+                        ? "Computer local time"
+                        : "Camera time"}
+                    </p>
+                  ) : null}
                 </div>
                 <p className="mt-3 text-xs leading-5 text-slate-500 dark:text-slate-400">
                   {selectedConfiguration.autoIngestEnabled
@@ -2332,6 +2395,7 @@ function App() {
                   ))}
                 </div>
               ) : null}
+              {sortPreset !== "original_tree" ? <CaptureTimeWarning /> : null}
               <button
                 className="mt-3 w-full rounded-lg bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-45 dark:text-white"
                 disabled={

@@ -51,6 +51,7 @@ use crate::local_store::{
 use crate::metadata::inspect;
 use crate::organization::{
     camera_identity, custom_directory_prefix, destination_relative_path_with_order_and_offset,
+    original_tree_destination_relative_path, resolve_capture_time_basis, CaptureTimeBasis,
     CustomDirectoryField, DestinationDepthSegment, SortMode,
 };
 
@@ -284,6 +285,9 @@ pub struct VerifiedIngestRequest {
     pub source_generation: u64,
     pub max_workers: usize,
     pub sort_mode: IngestSortMode,
+    /// Missing values from older clients preserve recorded camera wall time.
+    #[serde(default)]
+    pub capture_time_basis: CaptureTimeBasis,
     pub interval_minutes: Option<u16>,
     #[serde(default)]
     pub custom_directory_fields: Vec<CustomDirectoryField>,
@@ -494,6 +498,8 @@ pub struct CardRegistrationRequest {
     pub source_medium_key: String,
     pub destination_path: String,
     pub sort_mode: IngestSortMode,
+    #[serde(default)]
+    pub capture_time_basis: CaptureTimeBasis,
     pub interval_minutes: Option<u16>,
     #[serde(default)]
     pub custom_directory_fields: Vec<CustomDirectoryField>,
@@ -512,6 +518,7 @@ pub struct CardRegistration {
     pub auto_format_enabled: bool,
     pub destination_path: Option<String>,
     pub sort_mode: Option<IngestSortMode>,
+    pub capture_time_basis: CaptureTimeBasis,
     pub interval_minutes: Option<u16>,
     pub custom_directory_fields: Vec<CustomDirectoryField>,
     pub destination_depth_order: Vec<DestinationDepthSegment>,
@@ -820,6 +827,7 @@ fn register_card_marker(
         marker_token,
         destination_path: request.destination_path,
         sort_mode: ingest_sort_mode_name(&request.sort_mode).into(),
+        capture_time_basis: request.capture_time_basis,
         interval_minutes: match request.sort_mode {
             IngestSortMode::CameraInterval => request.interval_minutes,
             _ => None,
@@ -837,6 +845,7 @@ fn register_card_marker(
             auto_format_enabled: profile.auto_format_enabled,
             destination_path: Some(profile.destination_path),
             sort_mode: ingest_sort_mode_from_name(&profile.sort_mode),
+            capture_time_basis: profile.capture_time_basis,
             interval_minutes: profile.interval_minutes,
             custom_directory_fields: profile.custom_directory_fields,
             destination_depth_order: profile.destination_depth_order,
@@ -901,6 +910,7 @@ fn get_auto_ingest_profile_blocking(
             auto_format_enabled: false,
             destination_path: None,
             sort_mode: None,
+            capture_time_basis: CaptureTimeBasis::default(),
             interval_minutes: None,
             custom_directory_fields: Vec::new(),
             destination_depth_order: Vec::new(),
@@ -918,6 +928,7 @@ fn get_auto_ingest_profile_blocking(
                 auto_format_enabled: false,
                 destination_path: None,
                 sort_mode: None,
+                capture_time_basis: CaptureTimeBasis::default(),
                 interval_minutes: None,
                 custom_directory_fields: Vec::new(),
                 destination_depth_order: Vec::new(),
@@ -967,6 +978,7 @@ fn get_auto_ingest_profile_blocking(
                 auto_format_enabled: profile.auto_format_enabled,
                 destination_path: Some(profile.destination_path),
                 sort_mode: ingest_sort_mode_from_name(&profile.sort_mode),
+                capture_time_basis: profile.capture_time_basis,
                 interval_minutes: profile.interval_minutes,
                 custom_directory_fields: profile.custom_directory_fields,
                 destination_depth_order: profile.destination_depth_order,
@@ -980,6 +992,7 @@ fn get_auto_ingest_profile_blocking(
             auto_format_enabled: false,
             destination_path: None,
             sort_mode: None,
+            capture_time_basis: CaptureTimeBasis::default(),
             interval_minutes: None,
             custom_directory_fields: Vec::new(),
             destination_depth_order: Vec::new(),
@@ -2903,6 +2916,7 @@ fn prepare_recovery_ingest(
             source_generation: observed.connection_generation,
             max_workers,
             sort_mode: IngestSortMode::OriginalTree,
+            capture_time_basis: CaptureTimeBasis::default(),
             interval_minutes: None,
             custom_directory_fields: Vec::new(),
             destination_depth_order: None,
@@ -3487,27 +3501,50 @@ fn plan_copy_files(
     request: &VerifiedIngestRequest,
     operation_id: &str,
 ) -> Result<Vec<PlannedCopyFile>, IngestError> {
+    plan_copy_files_with_metadata_reader(source_files, source_root, request, operation_id, inspect)
+}
+
+fn plan_copy_files_with_metadata_reader(
+    source_files: Vec<crate::ingest::PlannedSourceFile>,
+    source_root: &std::path::Path,
+    request: &VerifiedIngestRequest,
+    operation_id: &str,
+    inspect_metadata: impl Fn(&std::path::Path) -> std::io::Result<crate::metadata::MediaMetadata>,
+) -> Result<Vec<PlannedCopyFile>, IngestError> {
     let mode = sort_mode_for_request(&request.sort_mode, request.interval_minutes);
     let mut used = HashSet::new();
     source_files
         .into_iter()
         .map(|source| {
-            let metadata = inspect(&source_root.join(&source.relative_path));
-            let camera = camera_identity(
-                &metadata.make,
-                &metadata.model,
-                metadata.body_serial.as_deref(),
-                operation_id,
-            );
-            let initial = destination_relative_path_with_order_and_offset(
-                &source.relative_path.to_string_lossy(),
-                &camera,
-                metadata.capture_time,
-                metadata.capture_offset_known,
-                mode.clone(),
-                &request.custom_directory_fields,
-                request.destination_depth_order.as_deref(),
-            )
+            let initial = if matches!(mode, SortMode::OriginalTree) {
+                // Original-tree organization has no capture-clock dependency.
+                original_tree_destination_relative_path(
+                    &source.relative_path.to_string_lossy(),
+                    &request.custom_directory_fields,
+                    request.destination_depth_order.as_deref(),
+                )
+            } else {
+                let metadata = inspect_metadata(&source_root.join(&source.relative_path))?;
+                let camera = camera_identity(
+                    &metadata.make,
+                    &metadata.model,
+                    metadata.body_serial.as_deref(),
+                    operation_id,
+                );
+                destination_relative_path_with_order_and_offset(
+                    &source.relative_path.to_string_lossy(),
+                    &camera,
+                    resolve_capture_time_basis(
+                        metadata.capture_time,
+                        metadata.capture_offset_known,
+                        request.capture_time_basis,
+                    ),
+                    metadata.capture_offset_known,
+                    mode.clone(),
+                    &request.custom_directory_fields,
+                    request.destination_depth_order.as_deref(),
+                )
+            }
             .map_err(|_| IngestError::InvalidPath)?;
             let destination_relative_path =
                 unique_destination_path(initial, &source.relative_path, &mut used)?;
@@ -3935,6 +3972,269 @@ mod tests {
     use super::*;
 
     #[test]
+    fn original_tree_planning_preserves_custom_order_and_collisions_without_metadata_reads() {
+        let request = VerifiedIngestRequest {
+            operation_id: None,
+            source_root: "/unused-source".into(),
+            destination_root: "/unused-destination".into(),
+            source_medium_key: "session:original-tree-clock".into(),
+            source_identity_confidence: IdentityConfidence::Unresolved,
+            source_generation: 1,
+            max_workers: 1,
+            sort_mode: IngestSortMode::OriginalTree,
+            capture_time_basis: CaptureTimeBasis::ComputerLocal,
+            interval_minutes: None,
+            custom_directory_fields: vec![
+                CustomDirectoryField::new("", "Project").expect("custom folder")
+            ],
+            destination_depth_order: Some(vec![
+                DestinationDepthSegment::OriginalTree,
+                DestinationDepthSegment::CustomField { index: 0 },
+            ]),
+            auto_ingest_triggered: false,
+        };
+        let sources = ["DCIM/clip.mov", "dcim/CLIP.mov"]
+            .into_iter()
+            .map(|path| crate::ingest::PlannedSourceFile {
+                relative_path: PathBuf::from(path),
+                byte_length: 12,
+            })
+            .collect();
+        let planned = plan_copy_files_with_metadata_reader(sources, Path::new(&request.source_root), &request, "original-tree-run", |_| panic!("original-tree planning must not request capture metadata or a filesystem timestamp")).expect("clock-independent original-tree plan");
+        assert_eq!(planned.len(), 2);
+        assert_eq!(
+            planned[0].destination_relative_path,
+            Path::new("DCIM").join("Project").join("clip.mov")
+        );
+        assert_eq!(
+            planned[1].destination_relative_path.parent(),
+            Some(Path::new("dcim/Project"))
+        );
+        assert!(planned[1]
+            .destination_relative_path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.starts_with("CLIP__") && name.ends_with(".mov")));
+        assert_ne!(
+            crate::organization::portable_destination_key(&planned[0].destination_relative_path),
+            crate::organization::portable_destination_key(&planned[1].destination_relative_path)
+        );
+
+        let camera_request = VerifiedIngestRequest {
+            sort_mode: IngestSortMode::CameraDay,
+            custom_directory_fields: Vec::new(),
+            destination_depth_order: None,
+            ..request
+        };
+        let camera_result = plan_copy_files_with_metadata_reader(
+            vec![crate::ingest::PlannedSourceFile {
+                relative_path: PathBuf::from("clip.mov"),
+                byte_length: 12,
+            }],
+            Path::new(&camera_request.source_root),
+            &camera_request,
+            "camera-clock-run",
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "capture fallback timestamp unavailable",
+                ))
+            },
+        );
+        assert!(matches!(camera_result, Err(IngestError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied), "a missing required capture clock must remain an error rather than becoming a synthetic timestamp");
+    }
+
+    #[test]
+    fn legacy_ingest_and_registration_requests_default_to_camera_recorded_time() {
+        let legacy_ingest = serde_json::json!({
+            "sourceRoot": "/source",
+            "destinationRoot": "/destination",
+            "sourceMediumKey": "session:legacy-clock",
+            "sourceIdentityConfidence": "unresolved",
+            "sourceGeneration": 1,
+            "maxWorkers": 2,
+            "sortMode": "camera_interval",
+            "intervalMinutes": 60
+        });
+        let request: VerifiedIngestRequest =
+            serde_json::from_value(legacy_ingest.clone()).expect("legacy ingest request");
+        assert_eq!(request.capture_time_basis, CaptureTimeBasis::CameraRecorded);
+        let mut computer_ingest = legacy_ingest;
+        computer_ingest["captureTimeBasis"] = serde_json::json!("computer_local");
+        assert_eq!(
+            serde_json::from_value::<VerifiedIngestRequest>(computer_ingest.clone())
+                .expect("explicit computer basis")
+                .capture_time_basis,
+            CaptureTimeBasis::ComputerLocal
+        );
+        computer_ingest["captureTimeBasis"] = serde_json::json!("host_guess");
+        assert!(serde_json::from_value::<VerifiedIngestRequest>(computer_ingest).is_err());
+
+        let legacy_registration = serde_json::json!({
+            "sourceMediumKey": "session:legacy-clock",
+            "destinationPath": "/destination",
+            "sortMode": "camera_interval",
+            "intervalMinutes": 60,
+            "autoIngestEnabled": true,
+            "autoFormatEnabled": false
+        });
+        let registration: CardRegistrationRequest =
+            serde_json::from_value(legacy_registration.clone())
+                .expect("legacy registration request");
+        assert_eq!(
+            registration.capture_time_basis,
+            CaptureTimeBasis::CameraRecorded
+        );
+        let mut computer_registration = legacy_registration;
+        computer_registration["captureTimeBasis"] = serde_json::json!("computer_local");
+        assert_eq!(
+            serde_json::from_value::<CardRegistrationRequest>(computer_registration)
+                .expect("explicit computer registration")
+                .capture_time_basis,
+            CaptureTimeBasis::ComputerLocal
+        );
+    }
+
+    #[test]
+    fn planning_applies_selected_capture_basis_while_recovery_keeps_frozen_paths() {
+        let root =
+            std::env::temp_dir().join(format!("capture-basis-plan-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::create_dir_all(source.join("DCIM")).expect("source");
+        let first_candidate = chrono::DateTime::parse_from_rfc3339("2026-10-13T13:42:00+09:00")
+            .expect("capture instant");
+        let camera_offset = if first_candidate
+            .with_timezone(&chrono::Local)
+            .offset()
+            .local_minus_utc()
+            == 9 * 60 * 60
+        {
+            "-09:00"
+        } else {
+            "+09:00"
+        };
+        let fixture = source.join("DCIM").join("A001.TIF");
+        std::fs::write(
+            &fixture,
+            crate::ingest::tests::exif_hour_range_tiff_with_offset(
+                "2026:10:13 13:42:00",
+                Some(camera_offset),
+                42,
+            ),
+        )
+        .expect("known-offset EXIF fixture");
+        let metadata = inspect(&fixture).expect("real capture metadata");
+        let computer_capture = metadata
+            .capture_time
+            .with_timezone(&chrono::Local)
+            .fixed_offset();
+        assert_ne!(
+            metadata.capture_time.offset(),
+            computer_capture.offset(),
+            "fixture camera offset must differ from the actual host offset"
+        );
+        let request = VerifiedIngestRequest {
+            operation_id: None,
+            source_root: source.to_string_lossy().into(),
+            destination_root: destination.to_string_lossy().into(),
+            source_medium_key: "session:capture-basis-plan".into(),
+            source_identity_confidence: IdentityConfidence::Unresolved,
+            source_generation: 1,
+            max_workers: 1,
+            sort_mode: IngestSortMode::CameraInterval,
+            capture_time_basis: CaptureTimeBasis::CameraRecorded,
+            interval_minutes: Some(60),
+            custom_directory_fields: Vec::new(),
+            destination_depth_order: None,
+            auto_ingest_triggered: false,
+        };
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let camera_plan = prepare_verified_ingest(request.clone(), operation_id.clone())
+            .expect("camera-recorded plan");
+        let computer_plan = prepare_verified_ingest(
+            VerifiedIngestRequest {
+                capture_time_basis: CaptureTimeBasis::ComputerLocal,
+                ..request.clone()
+            },
+            operation_id.clone(),
+        )
+        .expect("computer-local plan");
+        let camera = camera_identity(
+            &metadata.make,
+            &metadata.model,
+            metadata.body_serial.as_deref(),
+            &operation_id,
+        );
+        let expected_computer_path = destination_relative_path_with_order_and_offset(
+            "DCIM/A001.TIF",
+            &camera,
+            computer_capture,
+            true,
+            SortMode::CameraInterval { minutes: 60 },
+            &[],
+            None,
+        )
+        .expect("independently converted local-clock path");
+        assert_eq!(
+            computer_plan.files[0].destination_relative_path,
+            expected_computer_path
+        );
+        let camera_path = camera_plan.files[0].destination_relative_path.clone();
+        assert_ne!(camera_path, expected_computer_path);
+
+        let observed = StorageDevice {
+            state: DeviceState::Available,
+            connection_generation: request.source_generation,
+            identity: DeviceIdentity {
+                media_key: request.source_medium_key.clone(),
+                confidence: IdentityConfidence::Unresolved,
+                evidence: Vec::new(),
+            },
+            details: StorageDeviceDetails {
+                display_name: "fixture card".into(),
+                filesystem: Some("fixture".into()),
+                total_bytes: None,
+                available_bytes: None,
+                mount_locations: vec![request.source_root.clone()],
+                reader_fingerprint: None,
+                reader_family: None,
+                reader_slot: None,
+            },
+        };
+        let recovery = RecoverableIngestRun {
+            run_id: operation_id,
+            source_identity_key: request.source_medium_key,
+            source_generation: request.source_generation,
+            source_root: request.source_root,
+            destination_root: request.destination_root,
+            auto_ingest_triggered: false,
+        };
+        let frozen_files = camera_plan
+            .files
+            .into_iter()
+            .map(|file| PlannedFileRecord {
+                entry_id: file.entry_id,
+                source_relative_path: file.source.relative_path.to_string_lossy().into(),
+                destination_relative_path: file.destination_relative_path.to_string_lossy().into(),
+                byte_length: file.source.byte_length,
+            })
+            .collect();
+        let recovered = prepare_recovery_ingest(&recovery, frozen_files, 1, &observed)
+            .expect("frozen recovery plan");
+        assert_eq!(recovered.files[0].destination_relative_path, camera_path);
+        assert_ne!(
+            recovered.files[0].destination_relative_path,
+            expected_computer_path
+        );
+        assert!(
+            !destination.exists(),
+            "planning and recovery preparation remain read-only"
+        );
+        std::fs::remove_dir_all(root).expect("temporary fixture cleanup");
+    }
+
+    #[test]
     fn progress_gate_bounds_rapid_worker_events_without_delaying_the_next_cadence() {
         let gate = ProgressEmissionGate {
             last_emitted: Mutex::new(None),
@@ -4075,6 +4375,7 @@ mod tests {
             source_generation: 22,
             max_workers: 2,
             sort_mode: IngestSortMode::CameraDay,
+            capture_time_basis: CaptureTimeBasis::default(),
             interval_minutes: None,
             custom_directory_fields: Vec::new(),
             destination_depth_order: None,
@@ -4252,6 +4553,7 @@ mod tests {
             source_generation: 1,
             max_workers: 1,
             sort_mode: IngestSortMode::OriginalTree,
+            capture_time_basis: CaptureTimeBasis::default(),
             interval_minutes: None,
             custom_directory_fields: Vec::new(),
             destination_depth_order: None,
@@ -4619,6 +4921,7 @@ mod tests {
                 source_generation: 7,
                 max_workers: 2,
                 sort_mode: IngestSortMode::OriginalTree,
+                capture_time_basis: CaptureTimeBasis::default(),
                 interval_minutes: None,
                 custom_directory_fields: Vec::new(),
                 destination_depth_order: None,
@@ -4724,6 +5027,7 @@ mod tests {
             source_generation: 1,
             max_workers: 2,
             sort_mode: IngestSortMode::OriginalTree,
+            capture_time_basis: CaptureTimeBasis::default(),
             interval_minutes: None,
             custom_directory_fields: Vec::new(),
             destination_depth_order: None,
@@ -4780,6 +5084,7 @@ mod tests {
                 source_generation: 1,
                 max_workers: 2,
                 sort_mode: IngestSortMode::OriginalTree,
+                capture_time_basis: CaptureTimeBasis::default(),
                 interval_minutes: None,
                 custom_directory_fields: Vec::new(),
                 destination_depth_order: None,
@@ -4824,6 +5129,7 @@ mod tests {
                 source_generation: 1,
                 max_workers: 2,
                 sort_mode: IngestSortMode::OriginalTree,
+                capture_time_basis: CaptureTimeBasis::default(),
                 interval_minutes: None,
                 custom_directory_fields: Vec::new(),
                 destination_depth_order: None,
@@ -4864,6 +5170,7 @@ mod tests {
                 source_generation: 1,
                 max_workers: 2,
                 sort_mode: IngestSortMode::OriginalTree,
+                capture_time_basis: CaptureTimeBasis::default(),
                 interval_minutes: None,
                 custom_directory_fields: Vec::new(),
                 destination_depth_order: None,
@@ -4896,6 +5203,7 @@ mod tests {
                 source_generation: 1,
                 max_workers: 2,
                 sort_mode: IngestSortMode::OriginalTree,
+                capture_time_basis: CaptureTimeBasis::default(),
                 interval_minutes: None,
                 custom_directory_fields: Vec::new(),
                 destination_depth_order: None,
@@ -4950,6 +5258,7 @@ mod tests {
                 source_generation: 1,
                 max_workers: 1,
                 sort_mode: IngestSortMode::OriginalTree,
+                capture_time_basis: CaptureTimeBasis::default(),
                 interval_minutes: None,
                 custom_directory_fields: Vec::new(),
                 destination_depth_order: None,
@@ -4984,6 +5293,7 @@ mod tests {
             source_generation: 1,
             max_workers: 2,
             sort_mode: IngestSortMode::CameraDay,
+            capture_time_basis: CaptureTimeBasis::default(),
             interval_minutes: None,
             custom_directory_fields: vec![
                 CustomDirectoryField::new("Photographer", "Ari").expect("field")
@@ -5045,6 +5355,7 @@ mod tests {
                 source_generation: 1,
                 max_workers: 1,
                 sort_mode: IngestSortMode::CameraInterval,
+                capture_time_basis: CaptureTimeBasis::default(),
                 interval_minutes: Some(30),
                 custom_directory_fields: vec![
                     CustomDirectoryField::new("Photographer", "Ari").expect("field")
@@ -5103,7 +5414,7 @@ mod tests {
                 .expect("controlled hardware fixture root"),
         );
         let fixture = source.join("DCIM").join("A001.JPG");
-        let metadata = inspect(&fixture);
+        let metadata = inspect(&fixture).expect("hardware fixture metadata");
         assert_eq!(metadata.make, "Sony");
         assert_eq!(metadata.model, "FX3");
         assert_eq!(
@@ -5129,6 +5440,7 @@ mod tests {
                 source_generation: 1,
                 max_workers: 1,
                 sort_mode: IngestSortMode::CameraInterval,
+                capture_time_basis: CaptureTimeBasis::default(),
                 interval_minutes: Some(30),
                 custom_directory_fields: vec![
                     CustomDirectoryField::new("Photographer", "Ari").expect("field")
@@ -5190,6 +5502,7 @@ mod tests {
             source_generation: 1,
             max_workers: 1,
             sort_mode: IngestSortMode::CameraInterval,
+            capture_time_basis: CaptureTimeBasis::default(),
             interval_minutes: None,
             custom_directory_fields: Vec::new(),
             destination_depth_order: None,
@@ -5202,6 +5515,7 @@ mod tests {
 
         let incomplete_order = VerifiedIngestRequest {
             sort_mode: IngestSortMode::CameraDay,
+            capture_time_basis: CaptureTimeBasis::default(),
             interval_minutes: None,
             destination_depth_order: Some(Vec::new()),
             ..VerifiedIngestRequest {
@@ -5213,6 +5527,7 @@ mod tests {
                 source_generation: 1,
                 max_workers: 1,
                 sort_mode: IngestSortMode::OriginalTree,
+                capture_time_basis: CaptureTimeBasis::default(),
                 interval_minutes: None,
                 custom_directory_fields: Vec::new(),
                 destination_depth_order: None,
@@ -5274,6 +5589,7 @@ mod tests {
             source_generation: 1,
             max_workers: 2,
             sort_mode: IngestSortMode::CameraDay,
+            capture_time_basis: CaptureTimeBasis::default(),
             interval_minutes: None,
             custom_directory_fields: Vec::new(),
             destination_depth_order: None,
