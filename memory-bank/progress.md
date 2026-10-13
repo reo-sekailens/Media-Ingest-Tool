@@ -2,6 +2,23 @@
 
 ## 2026-10-13
 
+- Changed interval-child names to capture-clock ranges such as
+  `1300-1400+0800`, below the separate capture-date folder. Starts are included,
+  ends excluded, and final intervals clip at `2400`. Unknown offsets stay
+  explicit; new naming does not rename old files or alter saved recovery paths.
+- A real-file integration test generates seven valid TIFF/Exif images with
+  capture times spanning hour boundaries and next-day midnight, plus different
+  filesystem modification times. The production parser/planner/copy/readback
+  and JSON receipt path produce exact expected folders, same-hour grouping,
+  unchanged source bytes/mtime, matching preview plans, byte totals, hashes,
+  and receipt seal. This is local core evidence, not hardware/native-IPC or
+  SQLite completion certification.
+- Hourly modal selection/save, native profile registration, preview, and manual
+  request wiring are covered. All 80 frontend tests, TypeScript, ESLint, build,
+  Rust fmt/strict Clippy, and Windows native tests pass (110 passed, seven
+  hardware tests ignored in the isolated staged snapshot). Chromium hour-selection screenshot
+  QA passes with visible actions and no overflow or console errors.
+
 - Replaced the inline configuration and separate automation setup with a single
   Destination/Organization/Automation/Review dialog and explicit Save. The main
   page shows a compact applied summary. Back retains drafts; Cancel/Escape

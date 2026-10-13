@@ -321,6 +321,95 @@ test("native save errors retain the reviewed draft and retry sends the complete 
   );
 });
 
+test("saved EXIF-hour settings reach native preview and manual copy as sixty-minute intervals", async () => {
+  const { state, handler } = nativeConfigurationRuntime();
+  const samplePath = "FX3__fixture/20260823T000000+0800/1300-1400+0800/PHOTO.JPG";
+  tauri.invoke.mockImplementation(
+    (command: string, args?: { request?: Record<string, unknown> }) => {
+      if (command === "register_card_marker") {
+        state.profile = {
+          ...args?.request,
+          registered: true,
+          markerStatus: "recognized",
+        };
+        return Promise.resolve({ data: state.profile, error: null });
+      }
+      if (command === "preview_verified_ingest") {
+        return Promise.resolve({
+          data: {
+            operationId: args?.request?.operationId,
+            fileCount: 1,
+            totalBytes: 512,
+            sampleDestinationPaths: [samplePath],
+          },
+          error: null,
+        });
+      }
+      if (command === "start_verified_ingest")
+        return Promise.resolve({
+          data: null,
+          error: { message: "Copy fixture intercepted." },
+        });
+      return handler(command);
+    },
+  );
+  render(<App />);
+  await screen.findByRole("heading", { name: "hardware:config-a" });
+  const dialog = await openConfigurationDialog();
+  fireEvent.change(within(dialog).getByLabelText("Destination directory"), {
+    target: { value: "D:\\Ingest\\Hourly" },
+  });
+  advance();
+  fireEvent.click(within(dialog).getByRole("button", { name: "EXIF hour" }));
+  advance();
+  advance();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save configuration" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  const settings = {
+    sortMode: "camera_interval",
+    intervalMinutes: 60,
+    customDirectoryFields: [],
+    destinationDepthOrder: [
+      { kind: "camera_model" },
+      { kind: "capture_day" },
+      { kind: "capture_interval" },
+    ],
+  };
+  expect(tauri.invoke).toHaveBeenCalledWith("register_card_marker", {
+    request: {
+      sourceMediumKey: "hardware:config-a",
+      destinationPath: "D:\\Ingest\\Hourly",
+      ...settings,
+      autoIngestEnabled: false,
+      autoFormatEnabled: false,
+    },
+  });
+  expect(
+    tauri.invoke.mock.calls.some(([command]) => command === "start_verified_ingest"),
+  ).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Preview Organization" }));
+  expect(await screen.findByText(samplePath)).toBeVisible();
+  const previewRequest = tauri.invoke.mock.calls.find(
+    ([command]) => command === "preview_verified_ingest",
+  )?.[1].request;
+  expect(previewRequest).toMatchObject({
+    ...settings,
+    destinationRoot: "D:\\Ingest\\Hourly",
+    sourceMediumKey: "hardware:config-a",
+    sourceGeneration: 1,
+    autoIngestTriggered: false,
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Start Verified Ingest" }));
+  await waitFor(() =>
+    expect(tauri.invoke).toHaveBeenCalledWith(
+      "start_verified_ingest",
+      expect.objectContaining({
+        request: expect.objectContaining({ ...previewRequest }),
+      }),
+    ),
+  );
+});
+
 test("saving automation applies to future mounts without starting a current-mount copy", async () => {
   const { state, handler } = nativeConfigurationRuntime();
   tauri.invoke.mockImplementation(

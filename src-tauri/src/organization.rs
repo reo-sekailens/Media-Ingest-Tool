@@ -283,11 +283,13 @@ fn capture_interval_folder(
     // its final bucket simply ends at the next local midnight.
     let minute = capture.hour() as u16 * 60 + capture.minute() as u16;
     let bucket = minute / minutes * minutes;
+    let end = (bucket + minutes).min(24 * 60);
     Ok(format!(
-        "{}T{:02}{:02}00{}",
-        capture.format("%Y%m%d"),
+        "{:02}{:02}-{:02}{:02}{}",
         bucket / 60,
         bucket % 60,
+        end / 60,
+        end % 60,
         capture_offset_label(capture, capture_offset_known)
     ))
 }
@@ -648,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn interval_bucket_is_iso_8601_basic_and_includes_the_capture_offset() {
+    fn interval_bucket_names_its_range_and_includes_the_capture_offset() {
         let capture = Utc
             .with_ymd_and_hms(2026, 11, 1, 9, 47, 0)
             .unwrap()
@@ -661,7 +663,7 @@ mod tests {
             SortMode::CameraInterval { minutes: 60 },
         )
         .expect("path");
-        assert!(path.to_string_lossy().contains("20261101T010000-0800"));
+        assert!(path.to_string_lossy().contains("0100-0200-0800"));
     }
 
     #[test]
@@ -678,7 +680,110 @@ mod tests {
             SortMode::CameraInterval { minutes: 37 },
         )
         .expect("path");
-        assert!(path.to_string_lossy().contains("20260823T232600+0000"));
+        assert!(path.to_string_lossy().contains("2326-2400+0000"));
+    }
+
+    #[test]
+    fn hourly_ranges_are_start_inclusive_and_end_exclusive_under_a_separate_day() {
+        let offset = FixedOffset::east_opt(8 * 3600).expect("offset");
+        let camera = camera_identity("Sony", "FX3", Some("A-001"), "run");
+        for (hour, minute, second, expected) in [
+            (12, 59, 59, "1200-1300+0800"),
+            (13, 0, 0, "1300-1400+0800"),
+            (13, 59, 59, "1300-1400+0800"),
+            (14, 0, 0, "1400-1500+0800"),
+            (23, 59, 59, "2300-2400+0800"),
+        ] {
+            let capture = offset
+                .with_ymd_and_hms(2026, 8, 23, hour, minute, second)
+                .unwrap();
+            let path = destination_relative_path(
+                "PRIVATE/CLIP.MOV",
+                &camera,
+                capture,
+                SortMode::CameraInterval { minutes: 60 },
+            )
+            .expect("path");
+            assert_eq!(
+                path,
+                PathBuf::from(camera_folder(&camera))
+                    .join("20260823T000000+0800")
+                    .join(expected)
+                    .join("CLIP.MOV")
+            );
+            assert!(is_portable_destination_relative_path(&path));
+        }
+    }
+
+    #[test]
+    fn repeated_wall_clock_hours_keep_distinct_embedded_offsets() {
+        let daylight = FixedOffset::west_opt(7 * 3600)
+            .expect("daylight offset")
+            .with_ymd_and_hms(2026, 11, 1, 1, 30, 0)
+            .unwrap();
+        let standard = FixedOffset::west_opt(8 * 3600)
+            .expect("standard offset")
+            .with_ymd_and_hms(2026, 11, 1, 1, 30, 0)
+            .unwrap();
+        assert_eq!(
+            capture_interval_folder(daylight, true, 60),
+            Ok("0100-0200-0700".into())
+        );
+        assert_eq!(
+            capture_interval_folder(standard, true, 60),
+            Ok("0100-0200-0800".into())
+        );
+        assert_ne!(
+            capture_day_folder(daylight, true),
+            capture_day_folder(standard, true)
+        );
+        assert_eq!(
+            capture_interval_folder(standard, false, 60),
+            Ok("0100-0200-offset-unknown".into())
+        );
+    }
+
+    #[test]
+    fn custom_thirty_seven_minute_ranges_stay_anchored_at_local_midnight() {
+        let offset = FixedOffset::east_opt(8 * 3600).expect("offset");
+        for (hour, minute, second, expected) in [
+            (0, 0, 0, "0000-0037+0800"),
+            (0, 36, 59, "0000-0037+0800"),
+            (0, 37, 0, "0037-0114+0800"),
+            (13, 0, 0, "1257-1334+0800"),
+            (13, 33, 59, "1257-1334+0800"),
+            (13, 34, 0, "1334-1411+0800"),
+            (23, 59, 59, "2326-2400+0800"),
+        ] {
+            let capture = offset
+                .with_ymd_and_hms(2026, 8, 23, hour, minute, second)
+                .unwrap();
+            assert_eq!(
+                capture_interval_folder(capture, true, 37),
+                Ok(expected.into())
+            );
+        }
+    }
+
+    #[test]
+    fn final_interval_ranges_end_at_2400_without_spilling_into_the_next_day() {
+        let capture = FixedOffset::east_opt(8 * 3600)
+            .expect("offset")
+            .with_ymd_and_hms(2026, 8, 23, 23, 59, 59)
+            .unwrap();
+        for (minutes, expected) in [
+            (1, "2359-2400+0800"),
+            (37, "2326-2400+0800"),
+            (60, "2300-2400+0800"),
+            (90, "2230-2400+0800"),
+            (1_000, "1640-2400+0800"),
+            (1_440, "0000-2400+0800"),
+        ] {
+            assert_eq!(
+                capture_interval_folder(capture, true, minutes),
+                Ok(expected.into())
+            );
+        }
     }
 
     #[test]
@@ -711,9 +816,7 @@ mod tests {
             None,
         )
         .expect("path");
-        assert!(path
-            .to_string_lossy()
-            .contains("20260212T130000-offset-unknown"));
+        assert!(path.to_string_lossy().contains("1300-1330-offset-unknown"));
     }
 
     #[test]

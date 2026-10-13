@@ -2,6 +2,32 @@
 
 ## Current focus
 
+### 2026-10-13 capture-hour range folders
+
+- EXIF-hour organization now projects a capture at 13:42/+08:00 into a separate
+  date parent and `1300-1400+0800` child. Interval ranges include their start and
+  exclude their end. The final range ends at `2400`; midnight uses a new date.
+  Custom intervals remain anchored at capture-day midnight and clip at its end.
+  Known offsets remain distinct and absent offsets remain `-offset-unknown`.
+- Seven generated valid TIFF/Exif files exercise the production metadata reader,
+  planner, bounded verified-copy execution, and published JSON receipt. Captures
+  at 12:59:59, 13:00, 13:42, 13:59:59, 14:00, 23:59, and next-day midnight reach
+  exact expected paths. Different 2020 modification times cannot satisfy the
+  assertions. Preview/ingest plans agree, same-hour files share a directory,
+  source bytes/mtime stay unchanged, and independent BLAKE3 readback, progress
+  totals, receipt file counts/hashes, and manifest root agree.
+- The modal explains the hour range. Component/integration checks prove hourly
+  selection, reviewed registration, preview, and manual-ingest requests use
+  `camera_interval`/60 and a complete folder order. All 80 frontend tests,
+  TypeScript, ESLint, production build, Rust fmt/strict Clippy, and Windows native
+  tests pass (110 passed, seven hardware tests ignored in the isolated staged snapshot).
+  Chromium fixture QA shows the hour selection/example with visible actions,
+  no overflow, and no console errors. Screenshot evidence is outside Git.
+- Range naming applies to new plans. Existing published files stay in place;
+  recovery uses its saved paths. Evidence is local real-file core execution and
+  mocked frontend command wiring, not a fresh physical-card, native IPC,
+  cross-platform runtime, or SQLite completion certification.
+
 ### 2026-10-13 modal configuration and saving
 
 - Replaced inline destination/sort controls and the separate automatic-ingest
@@ -85,9 +111,10 @@ Implement the remaining TASK004 recovery/durability boundaries alongside conserv
   volume projection remains a 30-second fallback while native
   description/IOKit topology projection and physical Mac evidence are pending.
 
-- Destination time folders now use portable ISO 8601 basic timestamps, for
-  example `20260823T053000+0800`. Their offset comes from the aware EXIF
-  capture timestamp and is never converted to the workstation's timezone.
+- Destination dates are separate parent folders, for example
+  `20260823T000000+0800`; their interval children contain the time range and
+  offset, for example `0530-0600+0800`. An aware EXIF offset is never
+  converted to the workstation's timezone.
   A `DateTimeOriginal` with no offset keeps its recorded camera wall clock for
   day/interval grouping, but its folder is labelled `-offset-unknown` rather
   than claiming the ingest computer's timezone. Only absent or invalid

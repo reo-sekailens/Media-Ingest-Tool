@@ -5072,11 +5072,8 @@ mod tests {
             Some(b'+' | b'-')
         ));
         assert!(components[2].contains("__"));
-        assert!(components[3].contains('T'));
-        assert!(matches!(
-            components[3].as_bytes().get(15),
-            Some(b'+' | b'-')
-        ));
+        assert!(!components[3].contains('T'));
+        assert!(matches!(components[3].as_bytes().get(9), Some(b'+' | b'-')));
         assert_eq!(components[4], "clip.mov");
 
         let completed = execute_prepared_ingest(
@@ -5166,7 +5163,7 @@ mod tests {
             assert_eq!(components[2], "20260828T000000+0800");
             assert!(matches!(
                 components[3].as_str(),
-                "20260828T100000+0800" | "20260828T103000+0800" | "20260828T110000+0800"
+                "1000-1030+0800" | "1030-1100+0800" | "1100-1130+0800"
             ));
             assert!(copy.final_path.is_file());
         }

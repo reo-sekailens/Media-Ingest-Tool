@@ -10,9 +10,10 @@
   and preflight filesystem work runs on Tauri blocking workers. Per-operation
   progress IPC is coalesced to one event per 100 ms while exact native byte
   counters and terminal lifecycle events remain authoritative.
-- **Timestamp folders:** Camera-day and interval destination levels use
-  portable ISO 8601 basic timestamps (`YYYYMMDDTHHMMSS+HHMM`) built from the
-  aware EXIF capture offset. A naive EXIF timestamp preserves its recorded
+- **Timestamp folders:** The camera-day level uses a portable ISO 8601 basic
+  timestamp (`YYYYMMDDT000000+HHMM`); its interval child uses the capture-clock
+  range and offset (`HHMM-HHMM+HHMM`, for example `1300-1400+0800`). Both are built from the aware EXIF capture
+  offset. A naive EXIF timestamp preserves its recorded
   camera wall clock for grouping and uses an `-offset-unknown` label until an
   explicit camera timezone policy exists.
 - **Priority:** P0
@@ -170,6 +171,23 @@ Ship conservative defaults, expose advanced overrides only after tests, and stor
 ## Acceptance criteria
 
 ### Recent implementation evidence
+
+- 2026-10-13 — Capture-hour ranges are start-inclusive/end-exclusive and retain
+  a separate capture-date parent. Hour 13 uses `1300-1400+0800`; 14:00 moves
+  into `1400-1500+0800`, and 23:59 uses `2300-2400+0800`. Custom intervals stay
+  midnight-anchored with the final interval clipped at `2400`. Fixed offsets,
+  repeated wall-clock hours, and offset-unknown names remain distinct.
+  Seven valid generated TIFF/Exif fixtures with deliberately different mtime
+  pass the production metadata/planner/verified-copy/JSON-receipt path. Exact
+  folders, same-hour grouping, unchanged source bytes/mtime, preview equality,
+  readback/progress totals, receipt hashes/counts, and manifest root are checked.
+  All 80 frontend tests and Windows native tests (110 passed, seven hardware
+  cases ignored in the isolated staged snapshot) pass, alongside TypeScript, ESLint,
+  production build, Rust fmt, and strict Clippy. Hour selection/save and native
+  preview/manual request wiring use `camera_interval`/60. Browser screenshot
+  QA passes. Existing files are untouched, and recovery retains frozen paths.
+  Physical-card, native-IPC, cross-platform runtime, and SQLite completion
+  certification are not established by this local fixture check.
 
 - 2026-08-28 — The operator UI exposes capture-time sorting as selectable
   EXIF day, EXIF hour, custom-minute, and original-tree tags, including an

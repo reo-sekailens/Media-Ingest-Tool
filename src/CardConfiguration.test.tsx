@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { expect, test, vi } from "vitest";
 import { CardConfiguration } from "./CardConfiguration";
-import { createConfiguration } from "./configuration";
+import { createConfiguration, resolveSortRequest } from "./configuration";
 
 type ConfigurationProps = ComponentProps<typeof CardConfiguration>;
 
@@ -83,6 +83,77 @@ test.each(["", "0", "1441", "1.5"])(
     expect(onSave).not.toHaveBeenCalled();
   },
 );
+
+test("selecting EXIF hour explains its recorded-offset range and separate date folder", () => {
+  renderConfiguration();
+  next();
+  expect(screen.queryByText("1300-1400+0800")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "EXIF hour" }));
+
+  expect(screen.getByRole("button", { name: "EXIF hour" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  expect(screen.getByText("1300-1400+0800")).toBeVisible();
+  expect(screen.getByText(/EXIF hour example:/)).toHaveTextContent(
+    "13:42 capture with a recorded +08:00 offset",
+  );
+  expect(screen.getByText(/EXIF hour example:/)).toHaveTextContent(
+    "The capture date stays in a separate folder.",
+  );
+  expect(
+    screen.getByRole("button", { name: "Move 60-minute bucket in destination order" }),
+  ).toBeVisible();
+  expect(screen.queryByLabelText("Custom interval minutes")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "EXIF day" }));
+  expect(screen.queryByText("1300-1400+0800")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", {
+      name: "Move 60-minute bucket in destination order",
+    }),
+  ).not.toBeInTheDocument();
+});
+
+test("saves EXIF hour as a sixty-minute request with every ordered folder level", () => {
+  const { onSave } = renderConfiguration({
+    initialValue: createConfiguration({
+      destinationPath: "D:\\Ingest\\Documentary\\Day 13",
+      sortPreset: "exif_day",
+      customIntervalMinutes: "37",
+      customDirectoryFields: [{ label: "", value: "Photographer - Ari" }],
+      destinationDepthOrder: [
+        { kind: "capture_day" },
+        { kind: "custom_field", index: 0 },
+        { kind: "camera_model" },
+      ],
+    }),
+  });
+  next();
+  fireEvent.click(screen.getByRole("button", { name: "EXIF hour" }));
+  next();
+  next();
+  expect(screen.getByRole("heading", { name: "Review configuration" })).toBeVisible();
+  expect(onSave).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Save configuration" }));
+
+  expect(onSave).toHaveBeenCalledOnce();
+  const saved: ConfigurationProps["initialValue"] = onSave.mock.calls[0][0];
+  expect(saved.sortPreset).toBe("exif_hour");
+  expect(resolveSortRequest(saved.sortPreset, saved.customIntervalMinutes)).toEqual({
+    sortMode: "camera_interval",
+    intervalMinutes: 60,
+  });
+  expect(saved.destinationDepthOrder).toEqual([
+    { kind: "capture_day" },
+    { kind: "custom_field", index: 0 },
+    { kind: "camera_model" },
+    { kind: "capture_interval" },
+  ]);
+  expect(saved.customDirectoryFields).toEqual([
+    { label: "", value: "Photographer - Ari" },
+  ]);
+});
 
 test("cancelling a draft leaves the original destination and nested folders untouched", () => {
   const initialValue = createConfiguration({

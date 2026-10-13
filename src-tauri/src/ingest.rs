@@ -970,6 +970,386 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64};
 
+    /// One uncompressed grayscale pixel in a baseline little-endian TIFF,
+    /// with a real Exif sub-IFD rather than mocked metadata-reader results.
+    fn exif_hour_range_tiff(capture_time: &str, pixel: u8) -> Vec<u8> {
+        fn append_ascii(bytes: &mut Vec<u8>, value: &str) -> (u32, u32) {
+            if !bytes.len().is_multiple_of(2) {
+                bytes.push(0);
+            }
+            let offset = bytes.len() as u32;
+            bytes.extend_from_slice(value.as_bytes());
+            bytes.push(0);
+            ((value.len() + 1) as u32, offset)
+        }
+
+        fn write_ifd(bytes: &mut [u8], offset: usize, entries: &[(u16, u16, u32, u32)]) {
+            bytes[offset..offset + 2].copy_from_slice(&(entries.len() as u16).to_le_bytes());
+            for (index, (tag, field_type, count, value)) in entries.iter().enumerate() {
+                let start = offset + 2 + index * 12;
+                bytes[start..start + 2].copy_from_slice(&tag.to_le_bytes());
+                bytes[start + 2..start + 4].copy_from_slice(&field_type.to_le_bytes());
+                bytes[start + 4..start + 8].copy_from_slice(&count.to_le_bytes());
+                bytes[start + 8..start + 12].copy_from_slice(&value.to_le_bytes());
+            }
+            // The zero-filled final four bytes terminate the IFD chain.
+        }
+
+        let image_ifd_offset = 8;
+        let exif_ifd_offset = image_ifd_offset + 2 + 15 * 12 + 4;
+        let data_offset = exif_ifd_offset + 2 + 6 * 12 + 4;
+        let mut bytes = vec![0; data_offset];
+        bytes[..8].copy_from_slice(b"II*\0\x08\0\0\0");
+        let (make_length, make_offset) = append_ascii(&mut bytes, "Sony");
+        let (capture_length, capture_offset) = append_ascii(&mut bytes, capture_time);
+        let (offset_length, offset_offset) = append_ascii(&mut bytes, "+08:00");
+        let (serial_length, serial_offset) = append_ascii(&mut bytes, "hour-range-camera-01");
+        if !bytes.len().is_multiple_of(2) {
+            bytes.push(0);
+        }
+        let resolution_offset = bytes.len() as u32;
+        bytes.extend_from_slice(&72_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        let pixel_offset = bytes.len() as u32;
+        bytes.push(pixel);
+        write_ifd(
+            &mut bytes,
+            image_ifd_offset,
+            &[
+                (0x0100, 4, 1, 1), // ImageWidth
+                (0x0101, 4, 1, 1), // ImageLength
+                (0x0102, 3, 1, 8), // BitsPerSample
+                (0x0103, 3, 1, 1), // Compression: uncompressed
+                (0x0106, 3, 1, 1), // PhotometricInterpretation: black is zero
+                (0x010f, 2, make_length, make_offset),
+                (0x0110, 2, 4, u32::from_le_bytes(*b"FX3\0")),
+                (0x0111, 4, 1, pixel_offset), // StripOffsets
+                (0x0115, 3, 1, 1),            // SamplesPerPixel
+                (0x0116, 4, 1, 1),            // RowsPerStrip
+                (0x0117, 4, 1, 1),            // StripByteCounts
+                (0x011a, 5, 1, resolution_offset),
+                (0x011b, 5, 1, resolution_offset),
+                (0x0128, 3, 1, 2), // ResolutionUnit: inch
+                (0x8769, 4, 1, exif_ifd_offset as u32),
+            ],
+        );
+        write_ifd(
+            &mut bytes,
+            exif_ifd_offset,
+            &[
+                (0x9000, 7, 4, u32::from_le_bytes(*b"0231")),
+                (0x9003, 2, capture_length, capture_offset),
+                (0x9011, 2, offset_length, offset_offset),
+                (0xa000, 7, 4, u32::from_le_bytes(*b"0100")),
+                (0xa001, 3, 1, 1), // ColorSpace: sRGB
+                (0xa431, 2, serial_length, serial_offset),
+            ],
+        );
+        bytes
+    }
+
+    #[test]
+    fn exif_capture_hour_ranges_copy_real_media_and_seal_matching_receipt() {
+        use crate::metadata::{inspect, CaptureTimeSource};
+        use crate::{
+            execute_prepared_ingest, prepare_verified_ingest, IdentityConfidence, IngestSortMode,
+            VerifiedIngestRequest,
+        };
+        use std::collections::BTreeMap;
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let root = std::env::temp_dir().join(format!("ingest-exif-hour-ranges-{}", Uuid::new_v4()));
+        let source_root = root.join("source");
+        let destination_root = root.join("destination");
+        fs::create_dir_all(source_root.join("DCIM")).expect("fixture source");
+        let fixtures = [
+            (
+                "A001.TIF",
+                "2026:10:13 12:59:59",
+                "20261013T000000+0800",
+                "1200-1300+0800",
+            ),
+            (
+                "A002.TIF",
+                "2026:10:13 13:00:00",
+                "20261013T000000+0800",
+                "1300-1400+0800",
+            ),
+            (
+                "A003.TIF",
+                "2026:10:13 13:42:00",
+                "20261013T000000+0800",
+                "1300-1400+0800",
+            ),
+            (
+                "A004.TIF",
+                "2026:10:13 13:59:59",
+                "20261013T000000+0800",
+                "1300-1400+0800",
+            ),
+            (
+                "A005.TIF",
+                "2026:10:13 14:00:00",
+                "20261013T000000+0800",
+                "1400-1500+0800",
+            ),
+            (
+                "A006.TIF",
+                "2026:10:13 23:59:00",
+                "20261013T000000+0800",
+                "2300-2400+0800",
+            ),
+            (
+                "A007.TIF",
+                "2026:10:14 00:00:00",
+                "20261014T000000+0800",
+                "0000-0100+0800",
+            ),
+        ];
+        // A different year/day/hour ensures filesystem fallback cannot satisfy
+        // the bucket assertions accidentally, regardless of the test host date.
+        let modified_time = UNIX_EPOCH + Duration::from_secs(1_577_923_200);
+        let mut source_bytes = BTreeMap::new();
+        for (index, (name, capture, _, _)) in fixtures.iter().enumerate() {
+            let relative = PathBuf::from("DCIM").join(name);
+            let path = source_root.join(&relative);
+            let bytes = exif_hour_range_tiff(capture, index as u8);
+            fs::write(&path, &bytes).expect("valid TIFF fixture");
+            OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("fixture modification handle")
+                .set_times(fs::FileTimes::new().set_modified(modified_time))
+                .expect("deliberately different modification time");
+            let metadata = inspect(&path);
+            assert_eq!(metadata.make, "Sony");
+            assert_eq!(metadata.model, "FX3");
+            assert_eq!(
+                metadata.body_serial.as_deref(),
+                Some("hour-range-camera-01")
+            );
+            assert_eq!(
+                metadata.capture_time_source,
+                CaptureTimeSource::ExifOriginalWithOffset
+            );
+            assert!(metadata.capture_offset_known);
+            assert!(metadata.warning.is_none());
+            assert_eq!(
+                metadata.capture_time.offset().local_minus_utc(),
+                8 * 60 * 60
+            );
+            assert_eq!(
+                metadata
+                    .capture_time
+                    .format("%Y:%m:%d %H:%M:%S")
+                    .to_string(),
+                *capture
+            );
+            assert_ne!(
+                metadata.capture_time.timestamp(),
+                chrono::DateTime::<chrono::Utc>::from(modified_time).timestamp(),
+            );
+            source_bytes.insert(relative, bytes);
+        }
+
+        let operation_id = Uuid::new_v4().to_string();
+        let request = VerifiedIngestRequest {
+            operation_id: Some(operation_id.clone()),
+            source_root: source_root.to_string_lossy().into(),
+            destination_root: destination_root.to_string_lossy().into(),
+            source_medium_key: "session:exif-hour-range-fixture".into(),
+            source_identity_confidence: IdentityConfidence::Unresolved,
+            source_generation: 1,
+            max_workers: 2,
+            sort_mode: IngestSortMode::CameraInterval,
+            interval_minutes: Some(60),
+            custom_directory_fields: Vec::new(),
+            destination_depth_order: None,
+            auto_ingest_triggered: false,
+        };
+        // The read-only UI preview and ingest both use this production planner.
+        // Re-plan the same request rather than fabricating destination paths.
+        let preview =
+            prepare_verified_ingest(request.clone(), operation_id.clone()).expect("preview plan");
+        let preview_paths = preview
+            .files
+            .iter()
+            .map(|file| file.destination_relative_path.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            !destination_root.exists(),
+            "planning must not copy any media"
+        );
+        let prepared = prepare_verified_ingest(request, operation_id).expect("ingest plan");
+        assert_eq!(prepared.files.len(), fixtures.len());
+        assert_eq!(
+            prepared
+                .files
+                .iter()
+                .map(|file| file.destination_relative_path.clone())
+                .collect::<Vec<_>>(),
+            preview_paths,
+        );
+        let expected_bytes = source_bytes
+            .values()
+            .map(|bytes| bytes.len() as u64)
+            .sum::<u64>();
+        let progress_updates = Arc::new(Mutex::new(Vec::new()));
+        let observed_progress = Arc::clone(&progress_updates);
+        let progress: CopyProgressCallback = Arc::new(move |update| {
+            observed_progress
+                .lock()
+                .expect("progress updates")
+                .push(update);
+        });
+        let completed =
+            execute_prepared_ingest(prepared, Arc::new(AtomicBool::new(false)), Some(progress))
+                .expect("production verified copy and receipt");
+        assert_eq!(completed.summary.copied_files, fixtures.len());
+        assert_eq!(completed.summary.copied_bytes, expected_bytes);
+        assert_eq!(
+            completed
+                .copies
+                .iter()
+                .map(|copy| copy.destination_relative_path.clone())
+                .collect::<Vec<_>>(),
+            preview_paths
+        );
+        let camera_folder = completed.copies[0]
+            .destination_relative_path
+            .components()
+            .next()
+            .expect("camera folder")
+            .as_os_str()
+            .to_owned();
+        assert!(camera_folder.to_string_lossy().starts_with("FX3__"));
+        let mut expected_groups = BTreeMap::<PathBuf, Vec<String>>::new();
+        for (name, _, day, hour) in fixtures {
+            let relative_source = PathBuf::from("DCIM").join(name);
+            let expected_relative = PathBuf::from(&camera_folder)
+                .join(day)
+                .join(hour)
+                .join(name);
+            let copy = completed
+                .copies
+                .iter()
+                .find(|copy| copy.source_relative_path == relative_source)
+                .expect("copied fixture");
+            assert_eq!(copy.destination_relative_path, expected_relative);
+            assert_eq!(copy.final_path, destination_root.join(&expected_relative));
+            let original = source_bytes.get(&relative_source).expect("fixture bytes");
+            assert_eq!(
+                fs::read(&copy.final_path).expect("fresh destination readback"),
+                *original
+            );
+            assert_eq!(
+                fs::read(source_root.join(&relative_source)).expect("unchanged source"),
+                *original
+            );
+            assert_eq!(
+                fs::metadata(source_root.join(&relative_source))
+                    .expect("source metadata")
+                    .modified()
+                    .expect("source modification time"),
+                modified_time
+            );
+            assert_eq!(copy.digest_hex, blake3::hash(original).to_hex().to_string());
+            expected_groups
+                .entry(
+                    expected_relative
+                        .parent()
+                        .expect("hour bucket")
+                        .to_path_buf(),
+                )
+                .or_default()
+                .push(name.into());
+        }
+        for (group, mut expected_names) in expected_groups {
+            let mut actual_names = fs::read_dir(destination_root.join(group))
+                .expect("actual hour directory")
+                .map(|entry| {
+                    entry
+                        .expect("media entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>();
+            actual_names.sort();
+            expected_names.sort();
+            assert_eq!(
+                actual_names, expected_names,
+                "same-hour media must share one bucket"
+            );
+        }
+        let updates = progress_updates.lock().expect("copy/readback progress");
+        for stage in [CopyProgressStage::Copying, CopyProgressStage::Verifying] {
+            assert_eq!(
+                updates
+                    .iter()
+                    .filter(|update| update.stage == stage)
+                    .map(|update| update.bytes)
+                    .sum::<u64>(),
+                expected_bytes
+            );
+        }
+        drop(updates);
+
+        let receipt_path = destination_root
+            .join(".media-ingest-receipts")
+            .join(&completed.summary.receipt_name);
+        let receipt: IngestReceipt =
+            serde_json::from_slice(&fs::read(receipt_path).expect("published receipt"))
+                .expect("receipt JSON");
+        assert_eq!(receipt.schema_version, 1);
+        assert_eq!(receipt.manifest_algorithm, MANIFEST_ALGORITHM);
+        assert_eq!(
+            receipt.manifest_root_blake3,
+            manifest_root(&completed.copies)
+        );
+        assert_eq!(receipt.manifest_root_blake3, completed.manifest_root_blake3);
+        assert_eq!(receipt.source_medium_key, "session:exif-hour-range-fixture");
+        assert_eq!(receipt.source_identity_confidence, "unresolved");
+        assert_eq!(receipt.source_generation, 1);
+        assert_eq!(receipt.files.len(), fixtures.len());
+        assert_eq!(
+            receipt.files.iter().map(|file| file.bytes).sum::<u64>(),
+            expected_bytes
+        );
+        for copy in &completed.copies {
+            let relative = copy
+                .destination_relative_path
+                .to_string_lossy()
+                .replace('\\', "/");
+            let entry = receipt
+                .files
+                .iter()
+                .find(|file| file.relative_path == relative)
+                .expect("receipt entry");
+            assert_eq!(entry.bytes, copy.bytes);
+            assert_eq!(
+                entry.blake3,
+                blake3::hash(&fs::read(&copy.final_path).expect("receipt independent readback"))
+                    .to_hex()
+                    .to_string()
+            );
+        }
+        assert_eq!(
+            enumerate_regular_files(&source_root)
+                .expect("source inventory after ingest")
+                .len(),
+            fixtures.len()
+        );
+        assert!(!source_root.join(MARKER_FILE_NAME).exists());
+        assert_eq!(
+            enumerate_regular_files(&destination_root)
+                .expect("destination inventory")
+                .len(),
+            fixtures.len() + 1
+        );
+        fs::remove_dir_all(root).expect("temporary fixture cleanup");
+    }
+
     #[test]
     fn source_mount_guard_requires_the_same_filesystem_identity() {
         assert!(source_filesystem_matches(12, 12));

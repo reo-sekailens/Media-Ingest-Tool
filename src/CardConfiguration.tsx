@@ -359,6 +359,13 @@ export function CardConfiguration({
                     <span className="card-configuration__hint">1–1,440 minutes</span>
                   </label>
                 ) : null}
+                {draft.sortPreset === "exif_hour" ? (
+                  <p className="card-configuration__hint">
+                    EXIF hour example: a 13:42 capture with a recorded +08:00 offset
+                    uses <code>1300-1400+0800</code>. The capture date stays in a
+                    separate folder.
+                  </p>
+                ) : null}
                 <p className="card-configuration__hint">
                   EXIF capture time is used when available. Missing or invalid metadata
                   uses the source file timestamp; unknown camera identities remain

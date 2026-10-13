@@ -27,6 +27,15 @@ on the card. **Save configuration** applies the reviewed settings; Cancel or
 Escape discards the draft. The workspace shows the saved summary and an
 **Edit configuration** action.
 
+**EXIF hour** groups media by its embedded capture hour. For example, a 13:42
+capture with a +08:00 offset goes into
+`<camera>/20261013T000000+0800/1300-1400+0800/<filename>`. The start is included
+and the end is excluded, so a 14:00 capture goes into `1400-1500+0800`. The last
+hour ends at `2400`; midnight begins a new date folder. Custom intervals use the
+same range naming. Missing offsets remain explicit, and unreadable capture
+metadata uses the source modification timestamp. Existing files and frozen
+recovery paths are not renamed by this new-plan naming change.
+
 Card persistence uses the desktop app's existing mutable marker registration.
 Automatic ingest and automatic format require persistence and remain explicit
 opt-ins for future mounts. Saving does not start a copy. Session-only saving
