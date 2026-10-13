@@ -47,6 +47,7 @@ a:focus-visible {
   position: relative;
   isolation: isolate;
   overflow-x: hidden;
+  overflow-x: clip;
   background:
     radial-gradient(circle at 92% -12%, rgb(14 165 233 / 0.13), transparent 27rem),
     linear-gradient(135deg, #f8fafc 0%, #f1f5f9 52%, #f8fafc 100%);
@@ -84,6 +85,17 @@ a:focus-visible {
   background: rgb(2 6 23 / 0.72);
 }
 
+.ingest-modal {
+  overflow-y: auto;
+}
+
+.ingest-modal > section {
+  min-width: 0;
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .source-rail {
   position: relative;
   background: rgb(255 255 255 / 0.58);
@@ -118,9 +130,9 @@ a:focus-visible {
   }
 }
 
-.ingest-shell h1,
-.ingest-shell h2,
-.ingest-shell h3 {
+:is(.ingest-shell, .ingest-modal) h1,
+:is(.ingest-shell, .ingest-modal) h2,
+:is(.ingest-shell, .ingest-modal) h3 {
   font-family: "Segoe UI Variable", "Aptos", ui-sans-serif, system-ui, sans-serif;
   letter-spacing: -0.02em;
 }
@@ -131,7 +143,7 @@ a:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-.ingest-shell button {
+:is(.ingest-shell, .ingest-modal) button {
   cursor: pointer;
   transition-property:
     color, background-color, border-color, box-shadow, transform, opacity;
@@ -139,36 +151,36 @@ a:focus-visible {
   transition-timing-function: ease;
 }
 
-.ingest-shell button:not(:disabled):active {
+:is(.ingest-shell, .ingest-modal) button:not(:disabled):active {
   transform: translateY(1px);
 }
 
-.ingest-shell button:disabled {
+:is(.ingest-shell, .ingest-modal) button:disabled {
   cursor: not-allowed;
 }
 
 /* Light mode uses explicit ink tokens instead of Tailwind's faint slate-400
    and opacity-reduced disabled controls. These remain readable at WCAG AA
    contrast on the workspace's white, slate-50, and blue-50 surfaces. */
-html:not(.dark) .ingest-shell .text-slate-400,
-html:not(.dark) .ingest-shell .text-slate-500 {
+html:not(.dark) :is(.ingest-shell, .ingest-modal) .text-slate-400,
+html:not(.dark) :is(.ingest-shell, .ingest-modal) .text-slate-500 {
   color: #475569;
 }
 
-html:not(.dark) .ingest-shell .text-slate-600 {
+html:not(.dark) :is(.ingest-shell, .ingest-modal) .text-slate-600 {
   color: #334155;
 }
 
-html:not(.dark) .ingest-shell .text-amber-600 {
+html:not(.dark) :is(.ingest-shell, .ingest-modal) .text-amber-600 {
   color: #92400e;
 }
 
-html:not(.dark) .ingest-shell input::placeholder {
+html:not(.dark) :is(.ingest-shell, .ingest-modal) input::placeholder {
   color: #475569;
   opacity: 1;
 }
 
-html:not(.dark) .ingest-shell button:disabled {
+html:not(.dark) :is(.ingest-shell, .ingest-modal) button:disabled {
   border-color: #cbd5e1;
   background: #e2e8f0;
   color: #475569;
@@ -178,8 +190,8 @@ html:not(.dark) .ingest-shell button:disabled {
 
 /* Text-only actions read as links in a dense operational workspace. Each
    secondary action has a visible control boundary, including disabled states. */
-.ingest-shell button[class*="text-blue"]:not([class*="bg-"]),
-.ingest-shell button[class*="text-slate"]:not([class*="bg-"]) {
+:is(.ingest-shell, .ingest-modal) button[class*="text-blue"]:not([class*="bg-"]),
+:is(.ingest-shell, .ingest-modal) button[class*="text-slate"]:not([class*="bg-"]) {
   display: inline-flex;
   min-height: 2.5rem;
   align-items: center;
@@ -192,23 +204,29 @@ html:not(.dark) .ingest-shell button:disabled {
   white-space: nowrap;
 }
 
-.ingest-shell button[class*="text-blue"]:not([class*="bg-"]):not(:disabled):hover,
-.ingest-shell button[class*="text-slate"]:not([class*="bg-"]):not(:disabled):hover {
+:is(.ingest-shell, .ingest-modal)
+  button[class*="text-blue"]:not([class*="bg-"]):not(:disabled):hover,
+:is(.ingest-shell, .ingest-modal)
+  button[class*="text-slate"]:not([class*="bg-"]):not(:disabled):hover {
   border-color: #0284c7;
   background: #f0f9ff;
   box-shadow: 0 4px 12px rgb(14 116 144 / 0.12);
 }
 
-.dark .ingest-shell button[class*="text-blue"]:not([class*="bg-"]),
-.dark .ingest-shell button[class*="text-slate"]:not([class*="bg-"]) {
+.dark :is(.ingest-shell, .ingest-modal) button[class*="text-blue"]:not([class*="bg-"]),
+.dark
+  :is(.ingest-shell, .ingest-modal)
+  button[class*="text-slate"]:not([class*="bg-"]) {
   border-color: #334155;
   background: #0f172a;
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.32);
 }
 
-.dark .ingest-shell button[class*="text-blue"]:not([class*="bg-"]):not(:disabled):hover,
 .dark
-  .ingest-shell
+  :is(.ingest-shell, .ingest-modal)
+  button[class*="text-blue"]:not([class*="bg-"]):not(:disabled):hover,
+.dark
+  :is(.ingest-shell, .ingest-modal)
   button[class*="text-slate"]:not([class*="bg-"]):not(:disabled):hover {
   border-color: #38bdf8;
   background: #172554;
@@ -267,7 +285,7 @@ html:not(.dark) .ingest-shell button:disabled {
     animation: none;
   }
 
-  .ingest-shell button,
+  :is(.ingest-shell, .ingest-modal) button,
   .skip-to-workspace {
     transition-duration: 0ms;
   }

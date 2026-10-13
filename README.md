@@ -18,6 +18,21 @@ npm run tauri dev
 
 The app has no broad frontend filesystem or shell access. Native functionality is exposed only through narrow typed Rust commands.
 
+## Configure a card
+
+Select a connected card and choose **Configure ingest**. The dialog walks through
+Destination, Organization, Automation, and Review. Choose a folder, set the EXIF
+or original-tree rule and folder order, then choose whether to remember settings
+on the card. **Save configuration** applies the reviewed settings; Cancel or
+Escape discards the draft. The workspace shows the saved summary and an
+**Edit configuration** action.
+
+Card persistence uses the desktop app's existing mutable marker registration.
+Automatic ingest and automatic format require persistence and remain explicit
+opt-ins for future mounts. Saving does not start a copy. Session-only saving
+leaves previously stored card settings available for future mounts. Browser
+preview mode saves only session settings and does not write to removable media.
+
 ## Continuous verification and packaging
 
 The Quality workflow follows the checked-in Node/Rust policies and lockfiles and checks the frontend, native Rust, and packaging safeguards on Windows, macOS, and Linux. Normal pushes and pull requests also build a macOS app/DMG. Nightly and release workflows run those checks and the following package builds in parallel; publication requires every check and target to pass.

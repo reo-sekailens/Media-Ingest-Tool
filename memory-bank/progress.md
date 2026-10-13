@@ -1,5 +1,29 @@
 # Progress
 
+## 2026-10-13
+
+- Replaced the inline configuration and separate automation setup with a single
+  Destination/Organization/Automation/Review dialog and explicit Save. The main
+  page shows a compact applied summary. Back retains drafts; Cancel/Escape
+  discards them. Saved settings are isolated by card, insertion, and source root.
+- Added a shared draft/validation model, native profile hydration, reviewed
+  marker-save requests, source-loss/busy guards, retryable errors, native-picker
+  draft isolation, and future-mount-only automation after saving. Session-only
+  saving preserves any stored profile for subsequent mounts. Rust retains all
+  file, device, registration, ingest, and destructive-operation authority.
+- Retained the accessible shared modal foundation, keyboard folder ordering,
+  identity disclosure, receipt availability explanations, semantic source lists,
+  sticky toolbar, and matching application title/favicon from the earlier UI
+  review. Unrelated native and interval changes remain outside the UI commit.
+- Passed 77 frontend tests, strict TypeScript, ESLint, production build,
+  formatting, and memory-bank validation. Playwright CLI Chromium fixture QA
+  passes desktop, mobile, and short-window light/dark layouts at 1440x1000,
+  390x844, and 720x500. Save/reopen, cancel/discard, keyboard/focus, all steps,
+  picker errors, body scrolling, long text, and visible footer actions pass,
+  without console errors or horizontal overflow. Screenshots are outside Git.
+  Browser plugin access was unavailable; physical card/native picker execution,
+  packaged-platform rendering, and formal accessibility proof remain open.
+
 ## 2026-10-10
 
 - Added reusable five-target package builds plus nightly and version-tag release

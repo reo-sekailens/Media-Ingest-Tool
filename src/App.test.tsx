@@ -39,201 +39,441 @@ afterEach(() => {
   events.handlers.clear();
 });
 
-test("renders named, visible controls for the core ingest workflow", () => {
-  render(<App />);
-
-  expect(screen.getByRole("button", { name: "Rescan Connected Media" })).toBeVisible();
-  expect(screen.getByRole("button", { name: "Start Verified Ingest" })).toBeVisible();
-  expect(screen.getByRole("button", { name: "Set Up Auto-Ingest" })).toBeVisible();
-  expect(screen.getByLabelText("Destination directory")).toHaveAttribute(
-    "name",
-    "destination-directory",
+async function openConfigurationDialog() {
+  fireEvent.click(
+    screen.getByRole("button", { name: /^(configure ingest|edit configuration)$/i }),
   );
+  return await screen.findByRole("dialog", { name: "Configure card" });
+}
+function advance() {
+  fireEvent.click(screen.getByRole("button", { name: "Next" }));
+}
+async function saveSession(destination: string) {
+  const dialog = await openConfigurationDialog();
+  fireEvent.change(within(dialog).getByLabelText("Destination directory"), {
+    target: { value: destination },
+  });
+  advance();
+  advance();
+  const remember = within(dialog).getByLabelText("Remember configuration on this card");
+  if ((remember as HTMLInputElement).checked) fireEvent.click(remember);
+  advance();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save configuration" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+}
+function nativeSource(id = "hardware:config-a", generation = 1, mount = "F:\\") {
+  return {
+    state: "available",
+    connectionGeneration: generation,
+    identity: { mediaKey: id, confidence: "hardware_immutable", evidence: [] },
+    details: {
+      displayName: id,
+      filesystem: "exFAT",
+      totalBytes: 64000000000,
+      availableBytes: 32000000000,
+      mountLocations: [mount],
+      readerFingerprint: null,
+      readerFamily: null,
+      readerSlot: null,
+    },
+  };
+}
+function unregisteredProfile() {
+  return {
+    registered: false,
+    autoIngestEnabled: false,
+    autoFormatEnabled: false,
+    destinationPath: null,
+    sortMode: null,
+    intervalMinutes: null,
+    customDirectoryFields: [],
+    destinationDepthOrder: [],
+    markerStatus: "unavailable",
+  };
+}
+function nativeConfigurationRuntime() {
+  Object.assign(window, { __TAURI_INTERNALS__: {} });
+  const state = {
+    snapshot: { sequence: 1, devices: [nativeSource()] },
+    profile: unregisteredProfile() as Record<string, unknown>,
+  };
+  const handler = (command: string) => {
+    if (command === "get_device_snapshot")
+      return Promise.resolve({ data: state.snapshot });
+    if (command === "get_ingest_history") return Promise.resolve({ data: [] });
+    if (command === "get_auto_ingest_profile")
+      return Promise.resolve({ data: state.profile });
+    if (command === "watch_device_snapshots") return Promise.resolve({ data: {} });
+    return Promise.resolve({ data: null, error: null });
+  };
+  tauri.invoke.mockImplementation(handler);
+  return { state, handler };
+}
+
+test("replaces inline editors with a saved summary and a configuration dialog", async () => {
+  render(<App />);
+  expect(screen.queryByLabelText("Destination directory")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "EXIF day" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Start Verified Ingest" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Scan Media" })).toBeVisible();
   expect(screen.getByRole("link", { name: "Skip to workspace" })).toHaveAttribute(
     "href",
     "#ingest-workspace",
   );
-  expect(screen.getByText("F:\\ · SDXC")).toBeInTheDocument();
-  expect(screen.getByText("Drive F:\\ · SDXC")).toBeInTheDocument();
+  const dialog = await openConfigurationDialog();
+  expect(within(dialog).getByRole("heading", { name: "Destination" })).toBeVisible();
+  expect(within(dialog).getByLabelText("Destination directory")).toHaveValue("");
+  expect(
+    within(dialog).getByRole("list", { name: "Configuration steps" }),
+  ).toBeVisible();
 });
 
-test("switches the selected storage fixture", () => {
+test("saving applies configuration while cancelling later edits leaves it unchanged", async () => {
   render(<App />);
-  fireEvent.change(screen.getByLabelText("Destination directory"), {
-    target: { value: "D:\\Ingest\\A-Cam" },
+  await saveSession("D:\\Ingest\\A-Cam");
+  expect(screen.getByText("D:\\Ingest\\A-Cam")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Start Verified Ingest" })).toBeEnabled();
+  expect(
+    screen.getByText(/preview configuration saved for this session/i),
+  ).toBeVisible();
+  const dialog = await openConfigurationDialog();
+  fireEvent.change(within(dialog).getByLabelText("Destination directory"), {
+    target: { value: "D:\\Discarded" },
   });
-  fireEvent.click(screen.getByRole("button", { name: /b-cam/i }));
-  expect(
-    screen.getByRole("heading", { name: /b-cam.*microsdxc/i }),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByPlaceholderText("E:\\Ingest\\Documentary\\Day 03"),
-  ).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: /check quick format/i })).toBeDisabled();
-  expect(screen.getByText(/native format provider not installed/i)).toBeInTheDocument();
-  expect(
-    screen.getByText(/insertion 1.*changes after this medium is absent/i),
-  ).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("Destination directory"), {
-    target: { value: "E:\\Ingest\\B-Cam" },
-  });
-  fireEvent.click(screen.getByRole("button", { name: /a-cam/i }));
-  expect(screen.getByLabelText("Destination directory")).toHaveValue(
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.getByText("D:\\Ingest\\A-Cam")).toBeVisible();
+  expect(screen.queryByText("D:\\Discarded")).not.toBeInTheDocument();
+  const reopened = await openConfigurationDialog();
+  expect(within(reopened).getByLabelText("Destination directory")).toHaveValue(
     "D:\\Ingest\\A-Cam",
   );
+  expect(tauri.invoke).not.toHaveBeenCalled();
 });
 
-test("explains that source scanning needs the desktop runtime in fixture mode", () => {
-  render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: /scan media/i }));
-  expect(
-    screen.getByText(/media scanning is available in the desktop application/i),
-  ).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /b-cam/i }));
-  expect(
-    screen.queryByText(/media scanning is available in the desktop application/i),
-  ).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /a-cam/i }));
-  expect(
-    screen.getByText(/media scanning is available in the desktop application/i),
-  ).toBeInTheDocument();
-});
-
-test("keeps remembered destinations inside the desktop trust boundary", () => {
-  render(<App />);
-  fireEvent.change(screen.getByLabelText("Destination directory"), {
-    target: { value: "D:\\Ingest\\A-Cam" },
+test("draft cancellation restores trigger focus and removes modal background isolation", async () => {
+  const { container } = render(<App />);
+  const trigger = screen.getByRole("button", { name: "Configure ingest" });
+  trigger.focus();
+  const dialog = await openConfigurationDialog();
+  expect(container).toHaveAttribute("inert");
+  expect(container).toHaveAttribute("aria-hidden", "true");
+  expect(document.body.style.overflow).toBe("hidden");
+  fireEvent.keyDown(within(dialog).getByRole("button", { name: "Cancel" }), {
+    key: "Escape",
   });
-  fireEvent.click(screen.getByRole("button", { name: /remember for this card/i }));
-  expect(
-    screen.getByText(/destination memory is available in the desktop application/i),
-  ).toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(container).not.toHaveAttribute("inert");
+  expect(container).not.toHaveAttribute("aria-hidden");
+  expect(trigger).toHaveFocus();
 });
 
-test("keeps organization previews inside the desktop boundary", () => {
+test("configuration remains isolated between cards and fresh connections", async () => {
+  const { state } = nativeConfigurationRuntime();
+  state.snapshot.devices.push(nativeSource("hardware:config-b", 1, "M:\\"));
   render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: /preview organization/i }));
-  expect(
-    screen.getByText(/organization preview is available in the desktop application/i),
-  ).toBeInTheDocument();
+  await screen.findByRole("heading", { name: "hardware:config-a" });
+  await saveSession("D:\\Ingest\\A");
+  fireEvent.click(screen.getByRole("button", { name: /hardware:config-b.*64/i }));
+  expect(screen.queryByText("D:\\Ingest\\A")).not.toBeInTheDocument();
+  await saveSession("D:\\Ingest\\B");
+  fireEvent.click(screen.getByRole("button", { name: /hardware:config-a.*64/i }));
+  expect(screen.getByText("D:\\Ingest\\A")).toBeVisible();
+  expect(screen.queryByText("D:\\Ingest\\B")).not.toBeInTheDocument();
+  state.snapshot = { sequence: 2, devices: [nativeSource("hardware:config-a", 2)] };
+  await act(async () => events.handlers.get("media-ingest://reactivated")?.());
+  await waitFor(() =>
+    expect(screen.queryByText("D:\\Ingest\\A")).not.toBeInTheDocument(),
+  );
+  const dialog = await openConfigurationDialog();
+  expect(within(dialog).getByLabelText("Destination directory")).toHaveValue("");
 });
 
-test("selects EXIF sort tags and shows the resulting destination depth", () => {
+test("loads saved native organization and automation before editing", async () => {
+  const { state } = nativeConfigurationRuntime();
+  state.profile = {
+    registered: true,
+    destinationPath: "D:\\Saved",
+    sortMode: "camera_interval",
+    intervalMinutes: 37,
+    customDirectoryFields: [{ label: "", value: "Ari" }],
+    destinationDepthOrder: [
+      { kind: "capture_day" },
+      { kind: "custom_field", index: 0 },
+      { kind: "camera_model" },
+      { kind: "capture_interval" },
+    ],
+    autoIngestEnabled: false,
+    autoFormatEnabled: false,
+    markerStatus: "recognized",
+  };
   render(<App />);
-
+  await screen.findByText("D:\\Saved");
+  const dialog = await openConfigurationDialog();
+  expect(within(dialog).getByLabelText("Destination directory")).toHaveValue(
+    "D:\\Saved",
+  );
+  advance();
+  expect(within(dialog).getByLabelText("Custom interval minutes")).toHaveValue(37);
+  expect(within(dialog).getByLabelText("Custom folder 1 value")).toHaveValue("Ari");
+  advance();
   expect(
-    screen.getByRole("status", { name: "Destination depth 2 levels" }),
-  ).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Custom interval" }));
-  expect(screen.getByLabelText("Custom interval minutes")).toHaveValue(30);
+    within(dialog).getByLabelText("Remember configuration on this card"),
+  ).toBeChecked();
   expect(
-    screen.getByRole("status", { name: "Destination depth 3 levels" }),
-  ).toBeInTheDocument();
-  expect(screen.getByText("30-minute bucket")).toBeInTheDocument();
+    within(dialog).getByLabelText("Ingest automatically on mount"),
+  ).not.toBeChecked();
+  expect(
+    tauri.invoke.mock.calls.some(([command]) => command === "register_card_marker"),
+  ).toBe(false);
+});
 
-  fireEvent.change(screen.getByLabelText("Custom interval minutes"), {
+test("native save errors retain the reviewed draft and retry sends the complete settings", async () => {
+  const { state, handler } = nativeConfigurationRuntime();
+  let attempts = 0;
+  tauri.invoke.mockImplementation(
+    (command: string, args?: { request?: Record<string, unknown> }) => {
+      if (command === "register_card_marker") {
+        attempts += 1;
+        if (attempts === 1)
+          return Promise.resolve({
+            data: null,
+            error: { message: "Destination is offline." },
+          });
+        state.profile = {
+          ...args?.request,
+          registered: true,
+          markerStatus: "recognized",
+        };
+        return Promise.resolve({ data: state.profile, error: null });
+      }
+      return handler(command);
+    },
+  );
+  render(<App />);
+  await screen.findByRole("heading", { name: "hardware:config-a" });
+  const dialog = await openConfigurationDialog();
+  fireEvent.change(within(dialog).getByLabelText("Destination directory"), {
+    target: { value: "D:\\Ingest\\Configured" },
+  });
+  advance();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Custom interval" }));
+  fireEvent.change(within(dialog).getByLabelText("Custom interval minutes"), {
     target: { value: "45" },
   });
-  expect(screen.getByText("45-minute bucket")).toBeInTheDocument();
-
-  fireEvent.click(screen.getByRole("button", { name: "Original tree" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Add folder" }));
+  fireEvent.change(within(dialog).getByLabelText("Custom folder 1 value"), {
+    target: { value: "Ari" },
+  });
+  advance();
+  fireEvent.click(within(dialog).getByLabelText("Ingest automatically on mount"));
+  advance();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save configuration" }));
+  expect(await within(dialog).findByText("Destination is offline.")).toBeVisible();
   expect(
-    screen.getByRole("status", { name: "Destination depth 1 levels" }),
-  ).toBeInTheDocument();
-});
-
-test("adds one custom folder depth before the camera model", () => {
-  render(<App />);
-
-  fireEvent.click(screen.getByRole("button", { name: "Add field" }));
-  fireEvent.change(screen.getByLabelText("Custom folder 1 value"), {
-    target: { value: "Photographer — Ari" },
+    within(dialog).getByRole("heading", { name: "Review configuration" }),
+  ).toBeVisible();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save configuration" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(tauri.invoke).toHaveBeenLastCalledWith("get_device_snapshot");
+  expect(tauri.invoke).toHaveBeenCalledWith("register_card_marker", {
+    request: {
+      sourceMediumKey: "hardware:config-a",
+      destinationPath: "D:\\Ingest\\Configured",
+      sortMode: "camera_interval",
+      intervalMinutes: 45,
+      customDirectoryFields: [{ label: "", value: "Ari" }],
+      destinationDepthOrder: [
+        { kind: "custom_field", index: 0 },
+        { kind: "camera_model" },
+        { kind: "capture_day" },
+        { kind: "capture_interval" },
+      ],
+      autoIngestEnabled: true,
+      autoFormatEnabled: false,
+    },
   });
-
+  expect(screen.getByText("D:\\Ingest\\Configured")).toBeVisible();
   expect(
-    screen.getByRole("status", { name: "Destination depth 3 levels" }),
-  ).toBeInTheDocument();
-  expect(screen.getByText("Photographer — Ari")).toBeInTheDocument();
-  expect(screen.getByText("Camera model")).toBeInTheDocument();
-});
-
-test("reorders destination depth with draggable folder tags", () => {
-  render(<App />);
-  const camera = screen.getByRole("button", {
-    name: "Move Camera model in destination order",
-  });
-  const day = screen.getByRole("button", {
-    name: "Move EXIF capture day in destination order",
-  });
-  const dataTransfer = {
-    effectAllowed: "",
-    setData: vi.fn(),
-    getData: vi.fn(() => "camera_model"),
-  };
-
-  fireEvent.dragStart(camera, { dataTransfer });
-  fireEvent.drop(day, { dataTransfer });
-
-  expect(
-    screen
-      .getAllByRole("button", { name: /move .* in destination order/i })
-      .map((button) => button.textContent),
-  ).toEqual(["EXIF capture day", "Camera model"]);
-});
-
-test("reorders destination depth with a pointer drag", () => {
-  render(<App />);
-  const camera = screen.getByRole("button", {
-    name: "Move Camera model in destination order",
-  });
-  const day = screen.getByRole("button", {
-    name: "Move EXIF capture day in destination order",
-  });
-
-  fireEvent.pointerDown(camera, { pointerId: 1, pointerType: "mouse" });
-  fireEvent.pointerEnter(day, { pointerId: 1, pointerType: "mouse" });
-  fireEvent.pointerUp(day, { pointerId: 1, pointerType: "mouse" });
-
-  expect(
-    screen
-      .getAllByRole("button", { name: /move .* in destination order/i })
-      .map((button) => button.textContent),
-  ).toEqual(["EXIF capture day", "Camera model"]);
-});
-
-test("opens the auto-ingest setup modal", () => {
-  render(<App />);
-  const autoIngest = screen.getByRole("button", { name: /set up auto-ingest/i });
-  const startIngest = screen.getByRole("button", { name: /start verified ingest/i });
-  expect(autoIngest).toHaveClass("w-full", "px-4", "py-3", "text-sm");
-  expect(startIngest).toHaveClass("w-full", "px-4", "py-3", "text-sm");
-  expect(screen.getAllByRole("button").indexOf(autoIngest)).toBeLessThan(
-    screen.getAllByRole("button").indexOf(startIngest),
+    tauri.invoke.mock.calls.some(([command]) => command === "start_verified_ingest"),
+  ).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Start Verified Ingest" }));
+  await waitFor(() =>
+    expect(tauri.invoke).toHaveBeenCalledWith(
+      "start_verified_ingest",
+      expect.objectContaining({
+        request: expect.objectContaining({
+          sourceMediumKey: "hardware:config-a",
+          sourceGeneration: 1,
+          destinationRoot: "D:\\Ingest\\Configured",
+          sortMode: "camera_interval",
+          intervalMinutes: 45,
+          autoIngestTriggered: false,
+          customDirectoryFields: [{ label: "", value: "Ari" }],
+          destinationDepthOrder: [
+            { kind: "custom_field", index: 0 },
+            { kind: "camera_model" },
+            { kind: "capture_day" },
+            { kind: "capture_interval" },
+          ],
+        }),
+      }),
+    ),
   );
-  fireEvent.click(autoIngest);
-  expect(
-    screen.getByRole("dialog", { name: /set up auto-ingest/i }),
-  ).toBeInTheDocument();
-  expect(screen.getByLabelText("Auto-ingest destination directory")).toHaveValue(
-    "D:\\Ingest\\Documentary\\Day 03",
-  );
-  expect(screen.getByRole("button", { name: /save setup/i })).toBeEnabled();
-  fireEvent.click(screen.getByLabelText(/ingest automatically on mount/i));
-  expect(
-    screen.getByLabelText(/format after a verified auto-ingest/i),
-  ).not.toBeDisabled();
 });
 
-test("keeps typed destination entry as a browser-preview fallback", () => {
-  render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: "Choose destination folder" }));
-  expect(screen.getByText(/native folder selection is available/i)).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("Destination directory"), {
-    target: { value: "D:\\Ingest\\Manual" },
-  });
-  expect(screen.getByLabelText("Destination directory")).toHaveValue(
-    "D:\\Ingest\\Manual",
+test("saving automation applies to future mounts without starting a current-mount copy", async () => {
+  const { state, handler } = nativeConfigurationRuntime();
+  tauri.invoke.mockImplementation(
+    (command: string, args?: { request?: Record<string, unknown> }) => {
+      if (command === "register_card_marker") {
+        state.profile = {
+          ...args?.request,
+          registered: true,
+          markerStatus: "recognized",
+        };
+        return Promise.resolve({ data: state.profile });
+      }
+      return handler(command);
+    },
   );
+  render(<App />);
+  await screen.findByRole("heading", { name: "hardware:config-a" });
+  const dialog = await openConfigurationDialog();
+  fireEvent.change(within(dialog).getByLabelText("Destination directory"), {
+    target: { value: "D:\\Future" },
+  });
+  advance();
+  advance();
+  fireEvent.click(within(dialog).getByLabelText("Ingest automatically on mount"));
+  advance();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save configuration" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(
+    tauri.invoke.mock.calls.some(([command]) => command === "start_verified_ingest"),
+  ).toBe(false);
+  state.snapshot = { sequence: 2, devices: [nativeSource("hardware:config-a", 2)] };
+  await act(async () => events.handlers.get("media-ingest://reactivated")?.());
+  await waitFor(() =>
+    expect(tauri.invoke).toHaveBeenCalledWith(
+      "start_verified_ingest",
+      expect.objectContaining({
+        request: expect.objectContaining({
+          sourceGeneration: 2,
+          destinationRoot: "D:\\Future",
+          autoIngestTriggered: true,
+        }),
+      }),
+    ),
+  );
+  await act(async () => events.handlers.get("media-ingest://reactivated")?.());
+  expect(
+    tauri.invoke.mock.calls.filter(([command]) => command === "start_verified_ingest"),
+  ).toHaveLength(1);
+});
+
+test("a source change during an acknowledged save cannot apply its draft to another card", async () => {
+  const { state, handler } = nativeConfigurationRuntime();
+  let acknowledge: (() => void) | undefined;
+  tauri.invoke.mockImplementation((command: string) =>
+    command === "register_card_marker"
+      ? new Promise((resolve) => {
+          acknowledge = () => resolve({ data: { registered: true } });
+        })
+      : handler(command),
+  );
+  render(<App />);
+  await screen.findByRole("heading", { name: "hardware:config-a" });
+  const dialog = await openConfigurationDialog();
+  fireEvent.change(within(dialog).getByLabelText("Destination directory"), {
+    target: { value: "D:\\Card-A" },
+  });
+  advance();
+  advance();
+  advance();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Save configuration" }));
+  expect(
+    within(dialog).getByRole("button", { name: "Saving configuration…" }),
+  ).toBeDisabled();
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  expect(dialog).toBeInTheDocument();
+  state.snapshot = { sequence: 2, devices: [nativeSource("hardware:config-b", 2)] };
+  await act(async () => events.handlers.get("media-ingest://reactivated")?.());
+  await act(async () => acknowledge?.());
+  expect(
+    await within(dialog).findByText(
+      /save was confirmed, but this card disconnected or changed/i,
+    ),
+  ).toBeVisible();
+  expect(within(dialog).getByText("D:\\Card-A")).toBeVisible();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.getByRole("heading", { name: "hardware:config-b" })).toBeVisible();
+  expect(screen.queryByText("D:\\Card-A")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Start Verified Ingest" })).toBeDisabled();
+});
+
+test("an unavailable native profile cannot be overwritten with an empty default", async () => {
+  const { handler } = nativeConfigurationRuntime();
+  let unavailable = true;
+  tauri.invoke.mockImplementation((command: string) =>
+    command === "get_auto_ingest_profile" && unavailable
+      ? Promise.resolve({
+          data: null,
+          error: { message: "Saved configuration is unavailable." },
+        })
+      : handler(command),
+  );
+  render(<App />);
+  await screen.findByRole("heading", { name: "hardware:config-a" });
+  fireEvent.click(screen.getByRole("button", { name: "Configure ingest" }));
+  expect(await screen.findByText("Saved configuration is unavailable.")).toBeVisible();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  unavailable = false;
+  const dialog = await openConfigurationDialog();
+  expect(within(dialog).getByLabelText("Destination directory")).toHaveValue("");
+});
+
+test("a removed source keeps its draft visible and cannot save to the next selected card", async () => {
+  const { state } = nativeConfigurationRuntime();
+  render(<App />);
+  await screen.findByRole("heading", { name: "hardware:config-a" });
+  const dialog = await openConfigurationDialog();
+  fireEvent.change(within(dialog).getByLabelText("Destination directory"), {
+    target: { value: "D:\\Draft" },
+  });
+  advance();
+  advance();
+  advance();
+  state.snapshot = { sequence: 2, devices: [] };
+  await act(async () => events.handlers.get("media-ingest://reactivated")?.());
+  await waitFor(() =>
+    expect(
+      within(dialog).getByText(/no longer available for configuration/i),
+    ).toBeVisible(),
+  );
+  expect(
+    within(dialog).getByRole("button", { name: "Save configuration" }),
+  ).toBeDisabled();
+  expect(within(dialog).getByText("D:\\Draft")).toBeVisible();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(
+    tauri.invoke.mock.calls.some(([command]) => command === "register_card_marker"),
+  ).toBe(false);
+});
+
+test("still exposes source scanning, native preview boundaries and useful identity details", () => {
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Scan Media" }));
+  expect(
+    screen.getByText(/media scanning is available in the desktop application/i),
+  ).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Preview Organization" }));
+  expect(
+    screen.getByText(/organization preview is available in the desktop application/i),
+  ).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "View Details" }));
+  expect(screen.getByText("Current mount · mutable")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Open Receipt" })).toBeDisabled();
 });
 
 test("confirms an eligible quick format with an opaque native token", async () => {
@@ -335,9 +575,7 @@ test("confirms an eligible quick format with an opaque native token", async () =
 
   render(<App />);
   await screen.findByRole("heading", { name: /sacrificial sdxc/i });
-  fireEvent.change(screen.getByLabelText("Destination directory"), {
-    target: { value: "D:\\Ingest\\Format" },
-  });
+  await saveSession("D:\\Ingest\\Format");
   fireEvent.click(screen.getByRole("button", { name: /start verified ingest/i }));
   const quickFormat = await screen.findByRole("button", {
     name: /^check quick format$/i,
@@ -351,6 +589,7 @@ test("confirms an eligible quick format with an opaque native token", async () =
   const forceSubmit = within(forceDialog).getByRole("button", {
     name: /force reformat card/i,
   });
+  expect(within(forceDialog).getByRole("button", { name: /cancel/i })).toHaveFocus();
   expect(forceSubmit).toBeDisabled();
   fireEvent.change(within(forceDialog).getByLabelText(/force reformat confirmation/i), {
     target: { value: "FORCE REFORMAT" },
@@ -372,6 +611,7 @@ test("confirms an eligible quick format with an opaque native token", async () =
   const formatDialog = screen.getByRole("dialog", {
     name: /quick format this verified card/i,
   });
+  expect(within(formatDialog).getByRole("button", { name: /cancel/i })).toHaveFocus();
   expect(within(formatDialog).getByText("Sacrificial SDXC")).toBeInTheDocument();
   expect(within(formatDialog).getByText("sealed-format-run")).toBeInTheDocument();
   expect(

@@ -1,10 +1,11 @@
 # TASK008 — React operator workflow and accessible device UI
 
-- **Status:** in progress — fixture/native inventory distinction, a card-scoped native source-media scan, card-scoped session destinations and sort controls, a native read-only organization-preview control, controlled reader-slot calibration, card-keyed concurrent native operation/cancellation state, and typed queued/copying/verifying/completed/failed/cancelled progress stages are implemented. The active native copy counter advances from actual 1 MiB writes and carries the one-based planned-file ordinal and total file count without exposing paths; the same path-free per-file byte stream reports the fresh destination digest readback as `verifying`. The UI shows the ordinal for manual, recovery, and auto-ingest copies and verification, and derives copy-stage average rate and ETA from aggregate bytes. The preview shows totals and representative paths without copying and is discarded when its destination or rule changes. A native local-history panel shows only run state, verified counts/bytes, and receipt availability after media removal. The React surface now uses a Tailwind-first minimalist blue system with an accessible light/dark mode toggle, plus a modal-first auto-ingest setup flow that preserves the typed native registration boundary and explains the marker limitation. Automatic-run state is now persisted by exact identity/generation rather than only in the webview: a fresh session visibly reports that this mount has already been auto-ingested and does not start another copy. Browser coverage verifies this suppression, a recognized profile's interval, and copying/verification ordinal updates. After any successful ingest, the client refreshes native inventory before accepting another action, reconciling marker-created mutable keys without weakening Rust's exact current-source revalidation. The freshly rebuilt package then completed concurrent full-size-SD and microSD UI ingests. Destination fields now prefer a permitted Tauri native directory picker and retain manual typing only as fallback. Durable strong-identity destination recall UI, accessible format confirmation, physical-remount auto-ingest, recovery verification progress for files already published before a crash, and cross-platform native rendered evidence remain pending.
+- **Status:** in progress — fixture/native inventory distinction, a card-scoped native source-media scan, card-scoped session destinations and sort controls, a native read-only organization-preview control, controlled reader-slot calibration, card-keyed concurrent native operation/cancellation state, and typed queued/copying/verifying/completed/failed/cancelled progress stages are implemented. The active native copy counter advances from actual 1 MiB writes and carries the one-based planned-file ordinal and total file count without exposing paths; the same path-free per-file byte stream reports the fresh destination digest readback as `verifying`. The UI shows the ordinal for manual, recovery, and auto-ingest copies and verification, and derives copy-stage average rate and ETA from aggregate bytes. The preview shows totals and representative paths without copying and is discarded when its destination or rule changes. A native local-history panel shows only run state, verified counts/bytes, and receipt availability after media removal. The React surface now uses a Tailwind-first minimalist blue system with an accessible light/dark mode toggle, plus a four-step card configuration dialog with isolated drafts, explicit saving, and the typed native registration boundary and marker limitation. Automatic-run state is now persisted by exact identity/generation rather than only in the webview: a fresh session visibly reports that this mount has already been auto-ingested and does not start another copy. Browser coverage verifies this suppression, a recognized profile's interval, and copying/verification ordinal updates. After any successful ingest, the client refreshes native inventory before accepting another action, reconciling marker-created mutable keys without weakening Rust's exact current-source revalidation. The freshly rebuilt package then completed concurrent full-size-SD and microSD UI ingests. Destination fields now prefer a permitted Tauri native directory picker and retain manual typing only as fallback. Durable strong-identity destination recall UI, accessible format confirmation, physical-remount auto-ingest, recovery verification progress for files already published before a crash, and cross-platform native rendered evidence remain pending.
 - **Depends on:** TASK001, TASK002, TASK003, TASK004, TASK007
 - **Unlocks:** TASK005 operator flow, TASK010
-- **Latest visual evidence:** 2026-08-27 browser fixtures capture the refined
-  light and dark operator workspace. This is browser evidence only; no
+- **Latest visual evidence:** 2026-10-13 browser fixtures capture the four-step
+  configuration dialog and saved workspace in light/dark responsive layouts.
+  This is browser evidence only; no
   packaged-desktop rendering claim is made.
 - **Latest accessibility evidence:** Secondary actions render with visible
   button boundaries; keyboard skip/focus treatment, named destination fields,
@@ -16,6 +17,62 @@
   horizontal padding), replacing the prior cramped link-like presentation.
 
 ## Objective
+
+### 2026-10-13 step configuration
+
+The selected card now uses one draft-based dialog for Destination, Organization,
+Automation, and Review, with a final Save configuration action. Inline editors
+and the separate automatic-ingest setup were removed. The workspace renders an
+applied summary and Configure/Edit configuration button. Drafts survive Back,
+failed saves, and source removal; Cancel/Escape discards edits. Applied state is
+scoped to source key, insertion generation, and source root, so one card's setup
+does not become another card's setup.
+
+The existing native directory picker updates only the draft. Step validation
+covers destination, supported intervals, portable custom folders, folder order,
+and automation dependencies. Pointer/drag and keyboard Left/Right/Home/End
+ordering retain focus. Save/picker busy states block dismissal, while removed or
+busy cards cannot save. A shared modal isolates background controls and restores
+trigger focus. Body scrolling keeps actions visible on narrow/short windows.
+
+Remember-on-card saving sends the reviewed payload through the existing typed
+registration command and closes only after acknowledgement. Lookup failure does
+not substitute defaults for unknown saved preferences; failed saves retain the
+draft for retry. Session saving leaves persistent settings untouched. Automatic
+ingest/format require persistence, and Save does not launch the current mount's
+copy. Native profile rehydration handles mutable-marker key reconciliation.
+Rust continues to own identity, path safety, copying, and format authorization.
+
+Verification passes: 77 frontend tests, strict TypeScript, ESLint, production
+build, formatting, and memory-bank validation. Chromium fixtures at 1440x1000,
+390x844, and 720x500 cover all steps, save/reopen, cancel/discard, focus, folder
+ordering, picker errors, scrolling, footer visibility, and long-content wrapping
+in light/dark modes. No console errors or horizontal overflow were observed.
+Screenshots are outside Git. Playwright CLI supplied rendered checks because the
+Browser plugin was unavailable. Mocked native integration covers persistence,
+failure/retry, profile hydration, disconnects, and future-mount automation.
+Actual removable-card saving, the native picker, packaged rendering, and formal
+accessibility conformance are not established by these checks.
+
+### 2026-10-09 operator review
+
+Dialogs now share focus containment, background isolation, trigger-focus
+restoration, Escape handling, safe Cancel focus for destructive actions, and
+busy-operation dismissal protection. Short windows scroll within the overlay.
+Folder tags accept Left/Right/Home/End keys without losing focus; reordering
+continues to discard stale previews. Identity details now expand rather than
+acting as a dead control. Receipt opening stays disabled with an explanation
+and the existing destination receipt location. Connected sources use a labelled
+native list, and disabling automatic ingest clears its automatic-format option.
+Theme metadata and favicon match the app. All 23 frontend tests, TypeScript,
+ESLint, and production build pass. Production-fixture Chromium QA passes at
+1440x1000, 390x844, and 720x500, including keyboard ordering/focus, details,
+modal isolation/Tab/Escape/restore, destructive Cancel focus, theme metadata,
+sticky toolbar, overflow, and short-window action visibility. The toolbar uses
+overflow clipping with the prior hidden fallback for older engines. Screenshots
+were captured outside the repository. Playwright CLI was used because the
+Browser plugin was unavailable. Packaged/native and formal accessibility
+evidence remain separate gates.
 
 Build a calm, high-information desktop workflow in React and TypeScript with Tailwind CSS that makes source identity, destination, sort preview, copy progress, verification, errors, and formatting safety unambiguous.
 

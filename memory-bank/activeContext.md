@@ -2,6 +2,38 @@
 
 ## Current focus
 
+### 2026-10-13 modal configuration and saving
+
+- Replaced inline destination/sort controls and the separate automatic-ingest
+  setup with one four-step dialog: Destination, Organization, Automation, Review.
+  The workspace presents applied settings and Configure/Edit configuration.
+  Drafts are isolated; Back preserves edits and Cancel/Escape discards them.
+- Applied configuration is bound to source key, connection generation, and root.
+  Shared validation covers destination, interval, portable folder values, order,
+  and automation dependencies. Picker/save errors preserve the reviewed draft;
+  busy work locks dismissal and disconnected cards cannot save.
+- Remember-on-card saving uses the existing typed `register_card_marker` command.
+  Session saving leaves stored settings untouched. Failed saved-profile reads
+  prevent unknown preferences being overwritten. Saving automation suppresses
+  an immediate current-mount copy; future mounts use the normal native policy.
+  Mutable-marker reconciliation reloads the native profile without transferring
+  session drafts by mount path. No Rust contract changed in this UI work.
+- Shared dialogs contain focus, isolate the workspace, restore trigger focus,
+  and preserve destructive Cancel-first behavior. Folder ordering supports
+  pointer/drag and Left/Right/Home/End keys. Light/dark layouts scroll their body
+  while keeping modal actions visible on narrow and short windows.
+- Verification: 77 frontend tests (41 configuration, 17 dialog, 17 integration,
+  two shared-modal), TypeScript, ESLint, production build, formatting, and
+  memory-bank validation pass. Chromium browser-fixture QA passes at 1440x1000,
+  390x844, and 720x500: all steps, save/reopen, draft discard, focus, keyboard
+  ordering, picker errors, long-content wrapping, visible actions, and no console
+  errors or horizontal overflow. Playwright CLI was used because the Browser
+  plugin was unavailable. Screenshots are retained outside the repository.
+- Native persistence success/failure and lifecycle behavior have mocked typed
+  integration coverage. Physical-card persistence, the actual native picker,
+  packaged rendering, and formal accessibility certification remain unverified.
+  Earlier unrelated native reliability and interval changes remain local.
+
 ### 2026-10-10 nightly and release packaging
 
 - Nightly packaging snapshots the latest default-branch commit at 02:17

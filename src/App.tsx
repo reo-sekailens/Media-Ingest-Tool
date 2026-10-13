@@ -9,10 +9,23 @@ import {
   HardDriveDownload,
   ListTodo,
   RefreshCw,
-  TriangleAlert,
-  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Modal } from "./Modal";
+import { CardConfiguration } from "./CardConfiguration";
+import {
+  cloneConfiguration,
+  createConfiguration,
+  customDirectoryFieldsAreComplete,
+  defaultDestinationDepthOrder,
+  destinationDepthSegmentLabel,
+  normalizeDestinationDepthOrder,
+  resolveSortRequest,
+  validateConfiguration,
+  type ConfigurationDraft,
+  type CustomDirectoryField,
+  type DestinationDepthSegment,
+} from "./configuration";
 import "./App.css";
 
 type IdentityConfidence = "Verified" | "Reader-bound";
@@ -298,115 +311,30 @@ type CompletedRun = {
   sourceIdentityConfidence: string;
 };
 
-type SortPreset = "original_tree" | "exif_day" | "exif_hour" | "exif_custom";
-
-type SortRequest = {
-  sortMode: "original_tree" | "camera_day" | "camera_interval";
-  intervalMinutes: number | null;
-};
-
-type CustomDirectoryField = {
-  label: string;
-  value: string;
-};
-
-type DestinationDepthSegment =
-  | { kind: "custom_field"; index: number }
-  | { kind: "camera_model" }
-  | { kind: "capture_day" }
-  | { kind: "capture_interval" }
-  | { kind: "original_tree" };
-
-const CUSTOM_INTERVAL_MINUTES_MIN = 1;
-const CUSTOM_INTERVAL_MINUTES_MAX = 1_440;
-
-function resolveSortRequest(
-  preset: SortPreset,
-  customIntervalMinutes: string,
-): SortRequest | null {
-  if (preset === "original_tree") {
-    return { sortMode: "original_tree", intervalMinutes: null };
-  }
-  if (preset === "exif_day") {
-    return { sortMode: "camera_day", intervalMinutes: null };
-  }
-  if (preset === "exif_hour") {
-    return { sortMode: "camera_interval", intervalMinutes: 60 };
-  }
-  const interval = Number(customIntervalMinutes);
-  return Number.isInteger(interval) &&
-    interval >= CUSTOM_INTERVAL_MINUTES_MIN &&
-    interval <= CUSTOM_INTERVAL_MINUTES_MAX
-    ? { sortMode: "camera_interval", intervalMinutes: interval }
-    : null;
-}
-
-function defaultDestinationDepthOrder(
-  request: SortRequest | null,
-  customDirectoryFields: readonly CustomDirectoryField[],
-): DestinationDepthSegment[] {
-  const customFields = customDirectoryFields.map((_, index) => ({
-    kind: "custom_field" as const,
-    index,
-  }));
-  if (!request || request.sortMode === "original_tree") {
-    return [...customFields, { kind: "original_tree" }];
-  }
-  if (request.sortMode === "camera_day") {
-    return [...customFields, { kind: "camera_model" }, { kind: "capture_day" }];
-  }
-  return [
-    ...customFields,
-    { kind: "camera_model" },
-    { kind: "capture_day" },
-    { kind: "capture_interval" },
-  ];
-}
-
-function destinationDepthSegmentKey(segment: DestinationDepthSegment): string {
-  return segment.kind === "custom_field"
-    ? `${segment.kind}:${segment.index}`
-    : segment.kind;
-}
-
-function normalizeDestinationDepthOrder(
-  requested: readonly DestinationDepthSegment[],
-  available: readonly DestinationDepthSegment[],
-): DestinationDepthSegment[] {
-  const allowed = new Map(
-    available.map((segment) => [destinationDepthSegmentKey(segment), segment]),
-  );
-  const selected = requested.flatMap((segment) => {
-    const key = destinationDepthSegmentKey(segment);
-    const availableSegment = allowed.get(key);
-    if (!availableSegment) return [];
-    allowed.delete(key);
-    return [availableSegment];
-  });
-  return [...selected, ...allowed.values()];
-}
-
-function destinationDepthSegmentLabel(
-  segment: DestinationDepthSegment,
-  customDirectoryFields: readonly CustomDirectoryField[],
-  request: SortRequest | null,
+function configurationKey(
+  source: Pick<DeviceFixture, "id" | "connectionGeneration" | "sourceRoot">,
 ): string {
-  if (segment.kind === "custom_field") {
-    const field = customDirectoryFields[segment.index];
-    return field?.value.trim() || `Custom folder ${segment.index + 1}`;
-  }
-  if (segment.kind === "camera_model") return "Camera model";
-  if (segment.kind === "capture_day") return "EXIF capture day";
-  if (segment.kind === "capture_interval") {
-    return `${request?.intervalMinutes ?? "Custom"}-minute bucket`;
-  }
-  return "Original folders";
+  return JSON.stringify([source.id, source.connectionGeneration, source.sourceRoot]);
 }
 
-function customDirectoryFieldsAreComplete(
-  fields: readonly CustomDirectoryField[],
-): boolean {
-  return fields.every((field) => field.value.trim());
+function configurationFromRegistration(profile: CardRegistration): ConfigurationDraft {
+  return createConfiguration({
+    destinationPath: profile.destinationPath ?? "",
+    sortPreset:
+      profile.sortMode === "original_tree"
+        ? "original_tree"
+        : profile.sortMode === "camera_interval"
+          ? profile.intervalMinutes === 60
+            ? "exif_hour"
+            : "exif_custom"
+          : "exif_day",
+    customIntervalMinutes: String(profile.intervalMinutes ?? 30),
+    customDirectoryFields: profile.customDirectoryFields,
+    destinationDepthOrder: profile.destinationDepthOrder,
+    persistOnCard: true,
+    autoIngestEnabled: profile.autoIngestEnabled,
+    autoFormatEnabled: profile.autoIngestEnabled && profile.autoFormatEnabled,
+  });
 }
 
 function StatusDot({ tone }: { tone: "ready" | "copying" | "verified" }) {
@@ -424,26 +352,32 @@ function App() {
       ? "Monitoring removable storage"
       : "Preview fixture — native inventory is available in the desktop app",
   );
-  const [destinations, setDestinations] = useState<Record<string, string>>({});
   const [activeOperations, setActiveOperations] = useState<
     Readonly<Record<string, ActiveOperation>>
   >({});
   const [isIngestDockOpen, setIsIngestDockOpen] = useState(false);
+  const [isIdentityDetailsOpen, setIsIdentityDetailsOpen] = useState(false);
   const [ingestLabels, setIngestLabels] = useState<Readonly<Record<string, string>>>(
     {},
   );
-  const [sortPreset, setSortPreset] = useState<SortPreset>("exif_day");
-  const [customIntervalMinutes, setCustomIntervalMinutes] = useState("30");
-  const [customDirectoryFields, setCustomDirectoryFields] = useState<
-    readonly CustomDirectoryField[]
-  >([]);
-  const [destinationDepthOrder, setDestinationDepthOrder] = useState<
-    readonly DestinationDepthSegment[]
-  >([]);
-  const [draggedDepthSegmentKey, setDraggedDepthSegmentKey] = useState<string | null>(
-    null,
-  );
-  const draggedDepthSegmentKeyRef = useRef<string | null>(null);
+  const [configurations, setConfigurations] = useState<
+    Readonly<Record<string, ConfigurationDraft>>
+  >({});
+  const [configuration, setConfiguration] = useState<{
+    source: DeviceFixture;
+    initialValue: ConfigurationDraft;
+  } | null>(null);
+  const [configurationError, setConfigurationError] = useState("");
+  const [configurationLabels, setConfigurationLabels] = useState<
+    Readonly<Record<string, string>>
+  >({});
+  const [isLoadingConfiguration, setIsLoadingConfiguration] = useState(false);
+  const [isSavingConfiguration, setIsSavingConfiguration] = useState(false);
+  const savingConfigurationSource = useRef<DeviceFixture | null>(null);
+  const liveSourcesRef = useRef(liveDevices);
+  useEffect(() => {
+    liveSourcesRef.current = liveDevices;
+  }, [liveDevices]);
   const [calibrationKind, setCalibrationKind] = useState<"sd" | "micro_sd">("sd");
   const [calibrationLabel, setCalibrationLabel] = useState("");
   const [history, setHistory] = useState<readonly IngestHistoryEntry[]>([]);
@@ -465,12 +399,6 @@ function App() {
   const [planPreviewLabels, setPlanPreviewLabels] = useState<
     Readonly<Record<string, string>>
   >({});
-  const [destinationMemoryLabels, setDestinationMemoryLabels] = useState<
-    Readonly<Record<string, string>>
-  >({});
-  const [destinationPickerLabels, setDestinationPickerLabels] = useState<
-    Readonly<Record<string, string>>
-  >({});
   const [formatReadinessLabels, setFormatReadinessLabels] = useState<
     Readonly<Record<string, string>>
   >({});
@@ -488,14 +416,11 @@ function App() {
     Readonly<Record<string, CompletedRun>>
   >({});
   const [ejectLabels, setEjectLabels] = useState<Readonly<Record<string, string>>>({});
-  const [registrationLabel, setRegistrationLabel] = useState("");
-  const [autoIngestEnabled, setAutoIngestEnabled] = useState(false);
-  const [autoFormatEnabled, setAutoFormatEnabled] = useState(false);
-  const [isAutoIngestSetupOpen, setIsAutoIngestSetupOpen] = useState(false);
   const [isCloseConfirmationOpen, setIsCloseConfirmationOpen] = useState(false);
   const [isCancellingForClose, setIsCancellingForClose] = useState(false);
   const storageWatchStarted = useRef(false);
   const autoIngestAttempted = useRef(new Set<string>());
+  const hydratedProfiles = useRef(new Set<string>());
   // A mounted card can become registered while the app is already observing
   // it (for example, immediately after a managed format restores its marker).
   // Keep a short-lived lookup guard separate from the terminal attempt guard:
@@ -503,83 +428,41 @@ function App() {
   const autoIngestProfileChecks = useRef(new Set<string>());
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute("content", theme === "dark" ? "#020617" : "#f8fafc");
   }, [theme]);
   const selected = useMemo(
     () => liveDevices.find((device) => device.id === selectedId) ?? liveDevices[0],
     [liveDevices, selectedId],
   );
-  const destination = selected ? (destinations[selected.id] ?? "") : "";
-  const selectedSortRequest = resolveSortRequest(sortPreset, customIntervalMinutes);
-  const availableDestinationDepthOrder = defaultDestinationDepthOrder(
-    selectedSortRequest,
+  const selectedConfigurationKey = selected ? configurationKey(selected) : "";
+  const selectedConfiguration =
+    configurations[selectedConfigurationKey] ??
+    createConfiguration({
+      persistOnCard: isTauri(),
+    });
+  const destination = selectedConfiguration.destinationPath;
+  const {
+    sortPreset,
+    customIntervalMinutes,
     customDirectoryFields,
-  );
+    destinationDepthOrder,
+  } = selectedConfiguration;
+  const selectedSortRequest = resolveSortRequest(sortPreset, customIntervalMinutes);
   const selectedDestinationDepthOrder = normalizeDestinationDepthOrder(
     destinationDepthOrder,
-    availableDestinationDepthOrder,
+    defaultDestinationDepthOrder(selectedSortRequest, customDirectoryFields),
   );
-  const selectedSortLevels = selectedDestinationDepthOrder.flatMap((segment) => {
-    if (segment.kind !== "custom_field") {
-      return [
-        destinationDepthSegmentLabel(
-          segment,
-          customDirectoryFields,
-          selectedSortRequest,
-        ),
-      ];
-    }
-    const field = customDirectoryFields[segment.index];
-    return field?.value.trim()
-      ? [field.value.trim()]
-      : [
-          destinationDepthSegmentLabel(
-            segment,
-            customDirectoryFields,
-            selectedSortRequest,
-          ),
-        ];
-  });
-  const moveDestinationDepthSegment = useCallback(
-    (dragged: string, target: string) => {
-      if (!dragged || dragged === target) return;
-      setDestinationDepthOrder((current) => {
-        const order = normalizeDestinationDepthOrder(
-          current,
-          availableDestinationDepthOrder,
-        );
-        const from = order.findIndex(
-          (item) => destinationDepthSegmentKey(item) === dragged,
-        );
-        const to = order.findIndex(
-          (item) => destinationDepthSegmentKey(item) === target,
-        );
-        if (from < 0 || to < 0) return order;
-        const next = [...order];
-        const [moved] = next.splice(from, 1);
-        next.splice(to, 0, moved);
-        return next;
-      });
-      if (selected) {
-        setPlanPreviews((current) => {
-          const remaining = { ...current };
-          delete remaining[selected.id];
-          return remaining;
-        });
-        setPlanPreviewLabels((current) => ({ ...current, [selected.id]: "" }));
-      }
-    },
-    [availableDestinationDepthOrder, selected],
+  const selectedSortLevels = selectedDestinationDepthOrder.map((segment) =>
+    destinationDepthSegmentLabel(segment, customDirectoryFields, selectedSortRequest),
   );
+  const selectedConfigurationLabel =
+    configurationLabels[selectedConfigurationKey] ?? "";
   const selectedInventory = selected ? sourceInventories[selected.id] : undefined;
   const selectedInventoryLabel = selected ? sourceInventoryLabels[selected.id] : "";
   const selectedPlanPreview = selected ? planPreviews[selected.id] : undefined;
   const selectedPlanPreviewLabel = selected ? planPreviewLabels[selected.id] : "";
-  const selectedDestinationMemoryLabel = selected
-    ? destinationMemoryLabels[selected.id]
-    : "";
-  const selectedDestinationPickerLabel = selected
-    ? destinationPickerLabels[selected.id]
-    : "";
   const selectedFormatReadinessLabel = selected
     ? formatReadinessLabels[selected.id]
     : "";
@@ -611,9 +494,6 @@ function App() {
   const selectedEjectLabel = selected ? ejectLabels[selected.id] : "";
   const selectedOperation = selected ? activeOperations[selected.id] : undefined;
   const selectedIngestLabel = selected ? ingestLabels[selected.id] : "";
-  const canRememberDestination =
-    selected?.nativeConfidence === "hardware_immutable" ||
-    selected?.nativeConfidence === "hardware_stable";
   const dockOperations = useMemo(
     () =>
       Object.entries(activeOperations).map(([deviceId, operation]) => ({
@@ -679,54 +559,27 @@ function App() {
     },
     [],
   );
-  const setSelectedDestination = useCallback(
-    (value: string) => {
-      if (!selected) return;
-      setDestinations((current) => ({ ...current, [selected.id]: value }));
-      setPlanPreviews((current) => {
-        const next = { ...current };
-        delete next[selected.id];
-        return next;
-      });
-      setPlanPreviewLabels((current) => {
-        const next = { ...current };
-        delete next[selected.id];
-        return next;
-      });
-    },
-    [selected],
-  );
-  const chooseDestination = useCallback(async () => {
-    if (!selected) return;
-    if (!isTauri()) {
-      setDestinationPickerLabels((current) => ({
-        ...current,
-        [selected.id]:
-          "Native folder selection is available in the desktop application. You can type a path in this preview.",
-      }));
-      return;
-    }
+  const chooseConfigurationDestination = useCallback(async (currentPath: string) => {
+    if (!isTauri())
+      throw new Error(
+        "Native folder selection is available in the desktop application. You can type a path in this preview.",
+      );
     try {
-      const chosen = await open({
+      return await open({
         title: "Select ingest destination",
         directory: true,
         multiple: false,
-        defaultPath: destination || undefined,
+        defaultPath: currentPath || undefined,
       });
-      if (chosen) {
-        setSelectedDestination(chosen);
-        setDestinationPickerLabels((current) => ({ ...current, [selected.id]: "" }));
-      }
     } catch {
-      setDestinationPickerLabels((current) => ({
-        ...current,
-        [selected.id]:
-          "The native folder picker could not be opened. You can type a destination path instead.",
-      }));
+      throw new Error(
+        "The native folder picker could not be opened. Type a destination path instead.",
+      );
     }
-  }, [destination, selected, setSelectedDestination]);
+  }, []);
   const applyNativeSnapshot = useCallback((snapshot: NativeDeviceSnapshot) => {
     const nextDevices = snapshot.devices.map(asFixture);
+    liveSourcesRef.current = nextDevices;
     setLiveDevices(nextDevices);
     setSelectedId((current) =>
       nextDevices.some((device) => device.id === current)
@@ -1007,132 +860,206 @@ function App() {
     selectedDestinationDepthOrder,
     sortPreset,
   ]);
-  const recallDestination = useCallback(async () => {
-    if (!selected || !isTauri()) return;
-    try {
-      const response = await invoke<{
-        data: RememberedDestination | null;
-        error: { message: string } | null;
-      }>("get_remembered_destination", { sourceMediumKey: selected.id });
-      const remembered = response.data;
-      let memoryLabel =
-        "Session-only destination: immutable card identity is unavailable.";
-      if (remembered?.canRemember) {
-        memoryLabel = remembered.destinationPath
-          ? "Trusted destination recalled for this exact card."
-          : "No trusted destination saved for this card.";
-      }
-      setDestinationMemoryLabels((current) => ({
-        ...current,
-        [selected.id]: memoryLabel,
-      }));
-      const recalledDestination = remembered?.destinationPath;
-      if (recalledDestination) {
-        setDestinations((current) => ({
+  const openConfiguration = useCallback(async () => {
+    if (
+      !selected ||
+      !selected.ingestable ||
+      activeOperations[selected.id] ||
+      isLoadingConfiguration ||
+      savingConfigurationSource.current
+    )
+      return;
+    const source = { ...selected };
+    const key = configurationKey(source);
+    let initialValue = cloneConfiguration(selectedConfiguration);
+    setConfigurationError("");
+    setConfigurationLabels((current) => ({ ...current, [key]: "" }));
+    if (isTauri() && !configurations[key]) {
+      setIsLoadingConfiguration(true);
+      try {
+        const response = await invoke<{
+          data: CardRegistration | null;
+          error: { message: string } | null;
+        }>("get_auto_ingest_profile", { sourceMediumKey: source.id });
+        if (response.error) throw new Error(response.error.message);
+        if (response.data?.registered)
+          initialValue = configurationFromRegistration(response.data);
+        else if (
+          source.nativeConfidence === "hardware_immutable" ||
+          source.nativeConfidence === "hardware_stable"
+        ) {
+          const remembered = await invoke<{
+            data: RememberedDestination | null;
+            error: { message: string } | null;
+          }>("get_remembered_destination", { sourceMediumKey: source.id });
+          if (remembered.error) throw new Error(remembered.error.message);
+          if (remembered.data?.destinationPath)
+            initialValue.destinationPath = remembered.data.destinationPath;
+        }
+      } catch (error) {
+        setConfigurationError(
+          error instanceof Error
+            ? error.message
+            : "Saved settings could not be loaded. Close and retry before replacing them.",
+        );
+        // Never replace unknown saved options with defaults after a failed lookup.
+        setConfigurationLabels((current) => ({
           ...current,
-          [selected.id]: current[selected.id] || recalledDestination,
+          [key]:
+            error instanceof Error
+              ? error.message
+              : "Saved configuration could not be loaded. Retry before changing settings.",
         }));
+        setIsLoadingConfiguration(false);
+        return;
       }
-    } catch {
-      setDestinationMemoryLabels((current) => ({
-        ...current,
-        [selected.id]: "The trusted destination lookup is unavailable.",
-      }));
+      setIsLoadingConfiguration(false);
     }
-  }, [selected]);
-  const rememberDestination = useCallback(async () => {
-    if (!selected || !destination.trim()) return;
-    if (!isTauri()) {
-      setDestinationMemoryLabels((current) => ({
-        ...current,
-        [selected.id]: "Destination memory is available in the desktop application.",
-      }));
-      return;
-    }
-    try {
-      const response = await invoke<{
-        data: RememberedDestination | null;
-        error: { message: string } | null;
-      }>("remember_destination", {
-        request: {
-          sourceMediumKey: selected.id,
-          destinationPath: destination.trim(),
-        },
-      });
-      const remembered = response.data;
-      setDestinationMemoryLabels((current) => ({
-        ...current,
-        [selected.id]: remembered?.canRemember
-          ? "Trusted destination saved for this exact card."
-          : (response.error?.message ??
-            "This card cannot safely retain a destination yet."),
-      }));
-    } catch {
-      setDestinationMemoryLabels((current) => ({
-        ...current,
-        [selected.id]: "The trusted destination could not be saved.",
-      }));
-    }
-  }, [destination, selected]);
-  const registerCard = useCallback(async () => {
-    if (!selected || !destination.trim()) {
-      setRegistrationLabel("Choose a destination before registering this card.");
-      return;
-    }
-    const sortRequest = resolveSortRequest(sortPreset, customIntervalMinutes);
-    if (!sortRequest) {
-      setRegistrationLabel("Enter a whole custom interval from 1 to 1,440 minutes.");
-      return;
-    }
-    if (!customDirectoryFieldsAreComplete(customDirectoryFields)) {
-      setRegistrationLabel(
-        "Complete or remove each custom folder field before saving.",
-      );
-      return;
-    }
-    if (!isTauri()) {
-      setRegistrationLabel(
-        "Card registration is available in the desktop application.",
-      );
-      return;
-    }
-    setRegistrationLabel("Writing and registering the card marker…");
-    try {
-      const response = await invoke<{
-        data: CardRegistration | null;
-        error: { message: string } | null;
-      }>("register_card_marker", {
-        request: {
-          sourceMediumKey: selected.id,
-          destinationPath: destination.trim(),
-          sortMode: sortRequest.sortMode,
-          intervalMinutes: sortRequest.intervalMinutes,
-          customDirectoryFields,
-          destinationDepthOrder: selectedDestinationDepthOrder,
-          autoIngestEnabled,
-          autoFormatEnabled,
-        },
-      });
-      setRegistrationLabel(
-        response.data?.registered
-          ? response.data.autoIngestEnabled
-            ? "Card registered. It will begin a verified ingest once on each future mount."
-            : "Card registered. Auto-ingest is off."
-          : (response.error?.message ?? "The card could not be registered."),
-      );
-    } catch {
-      setRegistrationLabel("The desktop service could not register this card.");
-    }
+    setConfiguration({ source, initialValue });
   }, [
-    autoFormatEnabled,
-    autoIngestEnabled,
-    customDirectoryFields,
-    customIntervalMinutes,
-    destination,
     selected,
-    selectedDestinationDepthOrder,
-    sortPreset,
+    selectedConfiguration,
+    configurations,
+    activeOperations,
+    isLoadingConfiguration,
   ]);
+
+  const saveConfiguration = useCallback(
+    async (draft: ConfigurationDraft) => {
+      if (!configuration || savingConfigurationSource.current) return;
+      const source = configuration.source;
+      const isCurrentSource = () =>
+        liveSourcesRef.current.some(
+          (device) =>
+            configurationKey(device) === configurationKey(source) && device.ingestable,
+        );
+      if (!isCurrentSource()) {
+        setConfigurationError(
+          "This card is no longer connected. Close this dialog and select the current card.",
+        );
+        return;
+      }
+      if (activeOperations[source.id]) {
+        setConfigurationError(
+          "Wait for this card's ingest to finish before saving settings.",
+        );
+        return;
+      }
+      const error = validateConfiguration(draft);
+      if (error) {
+        setConfigurationError(error);
+        return;
+      }
+      if (draft.persistOnCard && !isTauri()) {
+        setConfigurationError(
+          "Saving settings on a card is available in the desktop application. Turn off card persistence to save preview settings for this session.",
+        );
+        return;
+      }
+      const saved = cloneConfiguration(draft);
+      saved.destinationPath = saved.destinationPath.trim();
+      const request = resolveSortRequest(
+        saved.sortPreset,
+        saved.customIntervalMinutes,
+      )!;
+      saved.destinationDepthOrder = normalizeDestinationDepthOrder(
+        saved.destinationDepthOrder,
+        defaultDestinationDepthOrder(request, saved.customDirectoryFields),
+      );
+      setConfigurationError("");
+      savingConfigurationSource.current = source;
+      setIsSavingConfiguration(true);
+      try {
+        if (saved.persistOnCard) {
+          const response = await invoke<{
+            data: CardRegistration | null;
+            error: { message: string } | null;
+          }>("register_card_marker", {
+            request: {
+              sourceMediumKey: source.id,
+              destinationPath: saved.destinationPath,
+              sortMode: request.sortMode,
+              intervalMinutes: request.intervalMinutes,
+              customDirectoryFields: saved.customDirectoryFields,
+              destinationDepthOrder: saved.destinationDepthOrder,
+              autoIngestEnabled: saved.autoIngestEnabled,
+              autoFormatEnabled: saved.autoIngestEnabled && saved.autoFormatEnabled,
+            },
+          });
+          if (!response.data?.registered) {
+            setConfigurationError(
+              response.error?.message ??
+                "Configuration could not be saved. Your draft is still available.",
+            );
+            return;
+          }
+          // Saving enables future mounts; it must not itself start a copy now.
+          hydratedProfiles.current.add(configurationKey(source));
+          autoIngestAttempted.current.add(
+            source.id + ":" + source.connectionGeneration,
+          );
+        }
+        if (!isCurrentSource()) {
+          setConfigurationError(
+            "The save was confirmed, but this card disconnected or changed. Close this dialog and reload the current card's settings.",
+          );
+          return;
+        }
+        setConfigurations((current) => ({
+          ...current,
+          [configurationKey(source)]: saved,
+        }));
+        setPlanPreviews((current) => {
+          const next = { ...current };
+          delete next[source.id];
+          return next;
+        });
+        setPlanPreviewLabels((current) => ({ ...current, [source.id]: "" }));
+        setConfigurationLabels((current) => ({
+          ...current,
+          [configurationKey(source)]: saved.persistOnCard
+            ? "Configuration saved for this card. Automation applies on future mounts."
+            : isTauri()
+              ? "Configuration saved for this session."
+              : "Preview configuration saved for this session.",
+        }));
+        if (saved.persistOnCard) {
+          try {
+            const snapshot = await invoke<{ data: NativeDeviceSnapshot | null }>(
+              "get_device_snapshot",
+            );
+            if (snapshot.data) {
+              // A newly written marker may change the mutable discovery key.
+              const matching = snapshot.data.devices.filter(
+                (device) =>
+                  device.state === "available" &&
+                  device.details.mountLocations.includes(source.sourceRoot),
+              );
+              if (matching.length === 1) {
+                const refreshed = asFixture(matching[0]);
+                autoIngestAttempted.current.add(
+                  refreshed.id + ":" + refreshed.connectionGeneration,
+                );
+              }
+              applyNativeSnapshot(snapshot.data);
+            }
+          } catch {
+            /* The save is confirmed; the inventory watcher will reconcile. */
+          }
+        }
+        setConfiguration(null);
+      } catch {
+        setConfigurationError(
+          "The desktop service could not confirm the save. Your draft is still available; retry when connected.",
+        );
+      } finally {
+        savingConfigurationSource.current = null;
+        setIsSavingConfiguration(false);
+      }
+    },
+    [configuration, activeOperations, applyNativeSnapshot],
+  );
+
   const checkFormatReadiness = useCallback(
     async (request: {
       runId: string;
@@ -1566,6 +1493,7 @@ function App() {
           intervalMinutes: sortRequest.intervalMinutes,
           customDirectoryFields,
           destinationDepthOrder: selectedDestinationDepthOrder,
+          autoIngestTriggered: false,
         },
         channel: progress,
       });
@@ -1638,7 +1566,9 @@ function App() {
       const attemptKey = `${device.id}:${device.connectionGeneration}`;
       if (
         !device.ingestable ||
-        autoIngestAttempted.current.has(attemptKey) ||
+        savingConfigurationSource.current?.sourceRoot === device.sourceRoot ||
+        (autoIngestAttempted.current.has(attemptKey) &&
+          hydratedProfiles.current.has(configurationKey(device))) ||
         autoIngestProfileChecks.current.has(attemptKey)
       )
         continue;
@@ -1649,7 +1579,28 @@ function App() {
       }>("get_auto_ingest_profile", { sourceMediumKey: device.id })
         .then(async (response) => {
           const profile = response.data;
+          if (response.error) {
+            setConfigurationLabels((current) => ({
+              ...current,
+              [configurationKey(device)]: response.error!.message,
+            }));
+            return;
+          }
+          if (savingConfigurationSource.current?.sourceRoot === device.sourceRoot)
+            return;
+          if (profile?.registered)
+            hydratedProfiles.current.add(configurationKey(device));
+          if (profile?.registered)
+            setConfigurations((current) =>
+              current[configurationKey(device)]
+                ? current
+                : {
+                    ...current,
+                    [configurationKey(device)]: configurationFromRegistration(profile),
+                  },
+            );
           if (
+            autoIngestAttempted.current.has(attemptKey) ||
             !profile?.registered ||
             !profile.autoIngestEnabled ||
             !profile.destinationPath
@@ -1684,10 +1635,6 @@ function App() {
               [device.id]: `Auto-ingest ${update.state.replace(/_/g, " ")} ${formatTransferBytes(update.transferredBytes)}${update.totalBytes === null ? "" : ` / ${formatTransferBytes(update.totalBytes)}`}${filePosition}`,
             }));
           };
-          setDestinations((current) => ({
-            ...current,
-            [device.id]: profile.destinationPath!,
-          }));
           setActiveOperations((current) => ({
             ...current,
             [device.id]: {
@@ -1762,6 +1709,13 @@ function App() {
               return next;
             });
           }
+        })
+        .catch(() => {
+          setConfigurationLabels((current) => ({
+            ...current,
+            [configurationKey(device)]:
+              "Saved card settings are unavailable. Retry configuration when connected.",
+          }));
         })
         .finally(() => {
           autoIngestProfileChecks.current.delete(attemptKey);
@@ -1884,16 +1838,6 @@ function App() {
     setIsCancellingForClose(false);
     setIsCloseConfirmationOpen(false);
   }, [activeOperations]);
-  const openAutoIngestSetup = useCallback(() => {
-    if (
-      selected &&
-      !destination &&
-      !selected.destination.startsWith("Choose a destination")
-    ) {
-      setSelectedDestination(selected.destination);
-    }
-    setIsAutoIngestSetupOpen(true);
-  }, [destination, selected, setSelectedDestination]);
   const calibrateReaderSlot = useCallback(async () => {
     if (!selected?.readerFingerprint || selected.logicalUnit === null) return;
     if (!isTauri()) {
@@ -1925,28 +1869,50 @@ function App() {
       setCalibrationLabel("The desktop service could not save this calibration.");
     }
   }, [calibrationKind, refreshDevices, selected]);
+  const configurationDialog = configuration ? (
+    <CardConfiguration
+      key={configurationKey(configuration.source)}
+      sourceName={configuration.source.name}
+      initialValue={configuration.initialValue}
+      saving={isSavingConfiguration}
+      error={configurationError}
+      sourceUnavailable={
+        !liveDevices.some(
+          (device) =>
+            configurationKey(device) === configurationKey(configuration.source) &&
+            device.ingestable,
+        ) || Boolean(activeOperations[configuration.source.id])
+      }
+      onSave={(draft) => void saveConfiguration(draft)}
+      onDismiss={() => {
+        if (!savingConfigurationSource.current) {
+          setConfiguration(null);
+          setConfigurationError("");
+        }
+      }}
+      onChooseDestination={chooseConfigurationDestination}
+    />
+  ) : null;
   if (!selected) {
     return (
-      <>
-        <main className="grid min-h-screen place-content-center gap-4 bg-slate-50 p-8 text-center text-slate-950 dark:bg-slate-950 dark:text-slate-50">
-          <h1 className="text-xl font-semibold tracking-tight">Ingest Station</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            No removable media is mounted. Insert a card and refresh inventory.
-          </p>
-          <button
-            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-500"
-            onClick={() => void refreshDevices()}
-            type="button"
-          >
-            Refresh Inventory
-          </button>
-        </main>
+      <main className="grid min-h-screen place-content-center gap-4 bg-slate-50 p-8 text-center text-slate-950 dark:bg-slate-950 dark:text-slate-50">
+        <h1 className="text-xl font-semibold tracking-tight">Ingest Station</h1>
+        <p className="text-sm text-slate-500 dark:text-slate-400">
+          No removable media is mounted. Insert a card and refresh inventory.
+        </p>
+        <button
+          className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-500"
+          onClick={() => void refreshDevices()}
+          type="button"
+        >
+          Refresh Inventory
+        </button>
         {isCloseConfirmationOpen ? (
-          <div
-            aria-labelledby="close-confirmation-title"
-            aria-modal="true"
+          <Modal
+            labelledBy="close-confirmation-title"
             className="fixed inset-0 z-50 grid place-items-center overscroll-contain bg-slate-950/40 p-4 backdrop-blur-sm"
-            role="dialog"
+            dismissible={!isCancellingForClose}
+            onDismiss={() => setIsCloseConfirmationOpen(false)}
           >
             <section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-slate-900">
               <p className="mb-1 text-[10px] font-bold tracking-[0.14em] text-amber-600 dark:text-amber-300">
@@ -1982,9 +1948,10 @@ function App() {
                 </button>
               </div>
             </section>
-          </div>
+          </Modal>
         ) : null}
-      </>
+        {configurationDialog}
+      </main>
     );
   }
   const isCopying = Boolean(selectedOperation) || selected.transfer === "Copying";
@@ -2050,45 +2017,49 @@ function App() {
             <StatusDot tone="ready" />
             <span>{scanLabel}</span>
           </div>
-          <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-1" role="list">
+          <ul
+            className="mt-4 grid list-none gap-2 p-0 sm:grid-cols-2 lg:grid-cols-1"
+            aria-label="Connected media"
+          >
             {liveDevices.map((device) => {
               const selectedCard = device.id === selected.id;
               const transferTone = device.transfer === "Copying" ? "copying" : "ready";
               return (
-                <button
-                  aria-pressed={selectedCard}
-                  className={`flex w-full gap-3 rounded-xl border p-3 text-left text-xs transition ${selectedCard ? "border-blue-200 bg-blue-50 shadow-sm dark:border-blue-500/40 dark:bg-blue-500/10" : "border-transparent hover:border-slate-200 hover:bg-slate-50 dark:hover:border-slate-700 dark:hover:bg-slate-800/70"}`}
-                  key={device.id}
-                  onClick={() => setSelectedId(device.id)}
-                  type="button"
-                >
-                  <span
-                    className="grid size-8 place-items-center rounded-lg bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300"
-                    aria-hidden="true"
+                <li key={device.id} className="min-w-0">
+                  <button
+                    aria-pressed={selectedCard}
+                    className={`flex w-full gap-3 rounded-xl border p-3 text-left text-xs transition ${selectedCard ? "border-blue-200 bg-blue-50 shadow-sm dark:border-blue-500/40 dark:bg-blue-500/10" : "border-transparent hover:border-slate-200 hover:bg-slate-50 dark:hover:border-slate-700 dark:hover:bg-slate-800/70"}`}
+                    onClick={() => setSelectedId(device.id)}
+                    type="button"
                   >
-                    <HardDrive className="size-4" strokeWidth={2.25} />
-                  </span>
-                  <span className="grid min-w-0 flex-1 gap-1">
-                    <span className="flex items-center justify-between gap-2 text-[13px] text-slate-900 dark:text-slate-100">
-                      <strong>{device.name}</strong>
-                      <StatusDot tone={transferTone} />
+                    <span
+                      className="grid size-8 place-items-center rounded-lg bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300"
+                      aria-hidden="true"
+                    >
+                      <HardDrive className="size-4" strokeWidth={2.25} />
                     </span>
-                    <span className="text-slate-500 dark:text-slate-400">
-                      {device.capacity} · {device.available}
+                    <span className="grid min-w-0 flex-1 gap-1">
+                      <span className="flex items-center justify-between gap-2 text-[13px] text-slate-900 dark:text-slate-100">
+                        <strong>{device.name}</strong>
+                        <StatusDot tone={transferTone} />
+                      </span>
+                      <span className="text-slate-500 dark:text-slate-400">
+                        {device.capacity} · {device.available}
+                      </span>
+                      <span className="text-slate-500 dark:text-slate-400">
+                        {device.sourceRoot
+                          ? `${device.sourceRoot} · ${device.kind.replace("Removable ", "")}`
+                          : device.kind}
+                      </span>
+                      <span className="text-slate-500 dark:text-slate-400">
+                        {device.slot}
+                      </span>
                     </span>
-                    <span className="text-slate-500 dark:text-slate-400">
-                      {device.sourceRoot
-                        ? `${device.sourceRoot} · ${device.kind.replace("Removable ", "")}`
-                        : device.kind}
-                    </span>
-                    <span className="text-slate-500 dark:text-slate-400">
-                      {device.slot}
-                    </span>
-                  </span>
-                </button>
+                  </button>
+                </li>
               );
             })}
-          </div>
+          </ul>
           <button
             className="mt-5 w-full border-t border-slate-200 px-1 py-4 text-left text-xs font-medium text-slate-500 transition hover:text-blue-700 dark:border-slate-800 dark:text-slate-400 dark:hover:text-blue-300"
             onClick={() => void refreshDevices()}
@@ -2257,297 +2228,52 @@ function App() {
                   </h3>
                 </div>
               </div>
-              <label className="mt-6 grid gap-2 text-xs font-medium text-slate-600 dark:text-slate-300">
-                <span>Destination directory</span>
-                <span className="flex gap-2">
-                  <input
-                    aria-label="Destination directory"
-                    autoComplete="off"
-                    className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2.5 font-mono text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100 dark:shadow-inner"
-                    name="destination-directory"
-                    onChange={(event) => setSelectedDestination(event.target.value)}
-                    placeholder={selected.destination}
-                    spellCheck={false}
-                    value={destination}
-                  />
-                  <button
-                    aria-label="Choose destination folder"
-                    className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-blue-300 dark:hover:bg-blue-500/10"
-                    disabled={isCopying || !selected.ingestable}
-                    onClick={() => void chooseDestination()}
-                    type="button"
-                  >
-                    Choose…
-                  </button>
-                </span>
-              </label>
-              {selectedDestinationPickerLabel ? (
-                <p
-                  className="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-400"
-                  aria-live="polite"
-                >
-                  {selectedDestinationPickerLabel}
+              <div
+                className="mt-5 rounded-xl bg-slate-50 p-4 dark:bg-slate-800/60"
+                aria-label="Saved configuration"
+              >
+                <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+                  Destination
                 </p>
-              ) : null}
-              <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
-                <button
-                  className="text-xs font-semibold text-blue-600 disabled:cursor-not-allowed disabled:opacity-40 dark:text-blue-400"
-                  disabled={isCopying || !canRememberDestination}
-                  onClick={() => void recallDestination()}
-                  title={
-                    canRememberDestination
-                      ? "Recall the destination saved for this exact card."
-                      : "Requires stable hardware card identity."
-                  }
-                  type="button"
-                >
-                  Recall Saved Destination
-                </button>
-                <button
-                  className="text-xs font-semibold text-blue-600 disabled:cursor-not-allowed disabled:opacity-40 dark:text-blue-400"
-                  disabled={!destination.trim() || isCopying || !canRememberDestination}
-                  onClick={() => void rememberDestination()}
-                  title={
-                    canRememberDestination
-                      ? "Save this destination for this exact card."
-                      : "Requires stable hardware card identity."
-                  }
-                  type="button"
-                >
-                  Remember for This Card
-                </button>
-                <span
-                  className="text-xs text-slate-500 dark:text-slate-400"
-                  aria-live="polite"
-                >
-                  {selectedDestinationMemoryLabel}
-                </span>
+                <p className="mt-1 break-all font-mono text-sm text-slate-800 dark:text-slate-100">
+                  {destination || "Choose a destination in Configure ingest."}
+                </p>
+                <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-700">
+                  <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+                    Folder organization
+                  </p>
+                  <p className="mt-1 text-sm leading-6 text-slate-700 dark:text-slate-200">
+                    {selectedSortLevels.join(" / ")} / Filename
+                  </p>
+                </div>
+                <p className="mt-3 text-xs leading-5 text-slate-500 dark:text-slate-400">
+                  {selectedConfiguration.autoIngestEnabled
+                    ? "Automatic ingest on future mounts"
+                    : "Manual ingest"}{" "}
+                  ·{" "}
+                  {selectedConfiguration.persistOnCard && destination
+                    ? "Saved card settings"
+                    : "Session settings"}
+                </p>
               </div>
-              <fieldset className="mt-6 border-t border-slate-200 py-4 dark:border-slate-800">
-                <legend className="text-xs font-semibold text-slate-700 dark:text-slate-200">
-                  Sort from capture metadata
-                </legend>
-                <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
-                  Uses EXIF capture time when available; unsupported or missing metadata
-                  stays traceable and falls back to the source file timestamp.
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2" aria-label="Sort rule">
-                  {(
-                    [
-                      ["exif_day", "EXIF day"],
-                      ["exif_hour", "EXIF hour"],
-                      ["exif_custom", "Custom interval"],
-                      ["original_tree", "Original tree"],
-                    ] as const
-                  ).map(([preset, label]) => (
-                    <button
-                      aria-pressed={sortPreset === preset}
-                      className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
-                        sortPreset === preset
-                          ? "border-blue-600 bg-blue-600 text-white"
-                          : "border-slate-200 bg-white text-slate-700 hover:border-blue-300 hover:text-blue-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-blue-500/60 dark:hover:text-blue-300"
-                      }`}
-                      key={preset}
-                      onClick={() => {
-                        setSortPreset(preset);
-                        if (!selected) return;
-                        setPlanPreviews((current) => {
-                          const next = { ...current };
-                          delete next[selected.id];
-                          return next;
-                        });
-                        setPlanPreviewLabels((current) => {
-                          const next = { ...current };
-                          delete next[selected.id];
-                          return next;
-                        });
-                      }}
-                      type="button"
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                {sortPreset === "exif_custom" ? (
-                  <label className="mt-3 flex max-w-xs items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-200">
-                    Every
-                    <input
-                      aria-label="Custom interval minutes"
-                      className="w-20 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-right font-mono text-sm outline-none focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
-                      max={CUSTOM_INTERVAL_MINUTES_MAX}
-                      min={CUSTOM_INTERVAL_MINUTES_MIN}
-                      onChange={(event) => setCustomIntervalMinutes(event.target.value)}
-                      step={1}
-                      type="number"
-                      value={customIntervalMinutes}
-                    />
-                    minutes
-                  </label>
-                ) : null}
-                <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-800">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <strong className="text-xs font-semibold text-slate-700 dark:text-slate-200">
-                        Custom folders
-                      </strong>
-                      <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                        Each entry makes one folder depth, for example Photographer —
-                        Ari.
-                      </p>
-                    </div>
-                    <button
-                      className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-blue-700 transition hover:border-blue-300 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-blue-300 dark:hover:bg-blue-500/10"
-                      disabled={customDirectoryFields.length >= 8}
-                      onClick={() =>
-                        setCustomDirectoryFields((current) => [
-                          ...current,
-                          { label: "", value: "" },
-                        ])
-                      }
-                      type="button"
-                    >
-                      Add field
-                    </button>
-                  </div>
-                  {customDirectoryFields.length ? (
-                    <div className="mt-3 grid gap-2">
-                      {customDirectoryFields.map((field, index) => (
-                        <div
-                          className="flex flex-wrap items-center gap-2"
-                          key={`${index}-${field.value}`}
-                        >
-                          <input
-                            aria-label={`Custom folder ${index + 1} value`}
-                            className="min-w-28 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
-                            onChange={(event) =>
-                              setCustomDirectoryFields((current) =>
-                                current.map((item, itemIndex) =>
-                                  itemIndex === index
-                                    ? { ...item, value: event.target.value }
-                                    : item,
-                                ),
-                              )
-                            }
-                            placeholder="Folder name, e.g. Photographer — Ari"
-                            value={field.value}
-                          />
-                          <button
-                            aria-label={`Remove custom folder ${index + 1}`}
-                            className="rounded-md px-2 py-1 text-xs font-semibold text-slate-500 transition hover:bg-slate-200 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-white"
-                            onClick={() =>
-                              setCustomDirectoryFields((current) =>
-                                current.filter((_, itemIndex) => itemIndex !== index),
-                              )
-                            }
-                            type="button"
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-                <div className="mt-4 grid gap-2 rounded-lg bg-slate-50 p-3 text-xs dark:bg-slate-800/70">
-                  <span
-                    aria-label={`Destination depth ${selectedSortLevels.length} levels`}
-                    className="font-semibold text-slate-700 dark:text-slate-200"
-                    role="status"
-                  >
-                    Destination depth · {selectedSortLevels.length} levels
-                  </span>
-                  <span className="text-slate-500 dark:text-slate-400">
-                    Drag folder tags to set their destination order. Filename stays
-                    last.
-                  </span>
-                  <ol className="flex flex-wrap items-center gap-1.5 text-slate-600 dark:text-slate-300">
-                    {selectedDestinationDepthOrder.map((segment, index) => {
-                      const key = destinationDepthSegmentKey(segment);
-                      const field =
-                        segment.kind === "custom_field"
-                          ? customDirectoryFields[segment.index]
-                          : undefined;
-                      const label = field
-                        ? field.value ||
-                          destinationDepthSegmentLabel(
-                            segment,
-                            customDirectoryFields,
-                            selectedSortRequest,
-                          )
-                        : destinationDepthSegmentLabel(
-                            segment,
-                            customDirectoryFields,
-                            selectedSortRequest,
-                          );
-                      return (
-                        <li className="flex items-center gap-1.5" key={key}>
-                          <button
-                            aria-label={`Move ${label} in destination order`}
-                            className={`cursor-grab rounded border bg-white px-2 py-1 font-mono text-[11px] shadow-sm transition active:cursor-grabbing dark:bg-slate-900 ${
-                              draggedDepthSegmentKey === key
-                                ? "border-blue-500 ring-2 ring-blue-500/20"
-                                : "border-slate-200 dark:border-slate-700"
-                            }`}
-                            draggable
-                            onDragEnd={() => {
-                              draggedDepthSegmentKeyRef.current = null;
-                              setDraggedDepthSegmentKey(null);
-                            }}
-                            onDragOver={(event) => event.preventDefault()}
-                            onDragStart={(event) => {
-                              event.dataTransfer.effectAllowed = "move";
-                              event.dataTransfer.setData("text/plain", key);
-                              draggedDepthSegmentKeyRef.current = key;
-                              setDraggedDepthSegmentKey(key);
-                            }}
-                            onDrop={(event) => {
-                              event.preventDefault();
-                              const dragged =
-                                event.dataTransfer.getData("text/plain") ||
-                                draggedDepthSegmentKeyRef.current;
-                              if (dragged) moveDestinationDepthSegment(dragged, key);
-                              draggedDepthSegmentKeyRef.current = null;
-                              setDraggedDepthSegmentKey(null);
-                            }}
-                            onPointerCancel={() => {
-                              draggedDepthSegmentKeyRef.current = null;
-                              setDraggedDepthSegmentKey(null);
-                            }}
-                            onPointerDown={() => {
-                              draggedDepthSegmentKeyRef.current = key;
-                              setDraggedDepthSegmentKey(key);
-                            }}
-                            onPointerEnter={() => {
-                              const dragged = draggedDepthSegmentKeyRef.current;
-                              if (dragged) moveDestinationDepthSegment(dragged, key);
-                            }}
-                            onPointerUp={() => {
-                              draggedDepthSegmentKeyRef.current = null;
-                              setDraggedDepthSegmentKey(null);
-                            }}
-                            type="button"
-                          >
-                            {label}
-                          </button>
-                          {index < selectedDestinationDepthOrder.length ? (
-                            <span>/</span>
-                          ) : null}
-                        </li>
-                      );
-                    })}
-                    <li>
-                      <span className="rounded bg-white px-2 py-1 font-mono text-[11px] shadow-sm dark:bg-slate-900">
-                        Filename
-                      </span>
-                    </li>
-                  </ol>
-                  {!selectedSortRequest ? (
-                    <span className="text-amber-700 dark:text-amber-300">
-                      Enter a whole interval from 1 to 1,440 minutes.
-                    </span>
-                  ) : null}
-                </div>
-              </fieldset>
+              <button
+                className="mt-4 w-full rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-100 disabled:opacity-45 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300"
+                disabled={isCopying || !selected.ingestable || isLoadingConfiguration}
+                onClick={() => void openConfiguration()}
+                type="button"
+              >
+                {isLoadingConfiguration
+                  ? "Loading configuration…"
+                  : destination
+                    ? "Edit configuration"
+                    : "Configure ingest"}
+              </button>
+              <p
+                className="mt-2 min-h-5 text-xs leading-5 text-slate-500 dark:text-slate-400"
+                aria-live="polite"
+              >
+                {selectedConfigurationLabel}
+              </p>
               <div className="flex items-center justify-between gap-4 border-t border-slate-200 py-3 text-xs dark:border-slate-800">
                 <span className="text-slate-500 dark:text-slate-400">
                   Camera identity
@@ -2606,32 +2332,14 @@ function App() {
                   ))}
                 </div>
               ) : null}
-              <div className="mt-6 grid gap-2 border-t border-slate-200 pt-5 dark:border-slate-800">
-                <button
-                  className="w-full rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-700 shadow-sm transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300 dark:hover:bg-blue-500/20"
-                  disabled={isCopying || !selected.ingestable}
-                  onClick={openAutoIngestSetup}
-                  type="button"
-                >
-                  Set Up Auto-Ingest
-                </button>
-                <div className="flex flex-wrap items-center gap-3">
-                  <span className="text-xs text-slate-500 dark:text-slate-400">
-                    {autoIngestEnabled
-                      ? "Auto-ingest is selected for this registration."
-                      : "Optional; disabled until you save setup."}
-                  </span>
-                  <span
-                    className="text-xs text-slate-500 dark:text-slate-400"
-                    aria-live="polite"
-                  >
-                    {registrationLabel}
-                  </span>
-                </div>
-              </div>
               <button
                 className="mt-3 w-full rounded-lg bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-45 dark:text-white"
-                disabled={isCopying || !selected.ingestable}
+                disabled={
+                  isCopying ||
+                  !selected.ingestable ||
+                  !destination.trim() ||
+                  isSavingConfiguration
+                }
                 onClick={() => void startIngest()}
                 type="button"
               >
@@ -2665,10 +2373,13 @@ function App() {
                   </h3>
                 </div>
                 <button
+                  aria-controls="identity-details"
+                  aria-expanded={isIdentityDetailsOpen}
                   className="text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400"
+                  onClick={() => setIsIdentityDetailsOpen((open) => !open)}
                   type="button"
                 >
-                  View Details
+                  {isIdentityDetailsOpen ? "Hide Details" : "View Details"}
                 </button>
               </div>
               <dl className="mt-5">
@@ -2714,6 +2425,53 @@ function App() {
                   </dd>
                 </div>
               </dl>
+              {isIdentityDetailsOpen ? (
+                <dl
+                  id="identity-details"
+                  className="mt-3 grid gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs dark:border-slate-700 dark:bg-slate-950/40"
+                >
+                  <div>
+                    <dt className="text-slate-500 dark:text-slate-400">
+                      Native identity confidence
+                    </dt>
+                    <dd className="m-0 mt-1 break-words font-mono">
+                      {selected.nativeConfidence.replace(/_/g, " ")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-500 dark:text-slate-400">
+                      Media reference
+                    </dt>
+                    <dd className="m-0 mt-1 break-all font-mono">{selected.id}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-500 dark:text-slate-400">
+                      Current mount · mutable
+                    </dt>
+                    <dd className="m-0 mt-1 break-all font-mono">
+                      {selected.sourceRoot || "No mounted source"}
+                    </dd>
+                  </div>
+                  {selected.readerFingerprint ? (
+                    <div>
+                      <dt className="text-slate-500 dark:text-slate-400">
+                        Reader reference · identifies the reader
+                      </dt>
+                      <dd className="m-0 mt-1 break-all font-mono">
+                        {selected.readerFingerprint}
+                      </dd>
+                    </div>
+                  ) : null}
+                  {selected.logicalUnit !== null ? (
+                    <div>
+                      <dt className="text-slate-500 dark:text-slate-400">
+                        Reader logical unit · not card identity
+                      </dt>
+                      <dd className="m-0 mt-1 font-mono">{selected.logicalUnit}</dd>
+                    </div>
+                  ) : null}
+                </dl>
+              ) : null}
               {selected.readerFingerprint && selected.logicalUnit !== null ? (
                 <div className="mt-4 grid gap-3 border-t border-slate-200 pt-4 dark:border-slate-800">
                   <p className="m-0 text-xs text-slate-500 dark:text-slate-400">
@@ -2774,11 +2532,21 @@ function App() {
               </p>
             </div>
             <button
+              aria-describedby="receipt-access-explanation"
               className="ml-auto text-xs font-semibold text-blue-700 hover:text-blue-800 dark:text-blue-300"
+              disabled
               type="button"
             >
               Open Receipt
             </button>
+            <p
+              id="receipt-access-explanation"
+              className="m-0 basis-full text-xs leading-5 text-slate-600 dark:text-slate-300"
+            >
+              Receipt opening is not available in this app yet. Completed native ingests
+              save JSON receipts in the destination&apos;s{" "}
+              <code>.media-ingest-receipts</code> folder.
+            </p>
           </article>
           <article
             className="mt-8 border-t border-slate-200 pt-8 dark:border-slate-800"
@@ -2849,20 +2617,12 @@ function App() {
         </section>
       </section>
       {pendingFormatConfirmation ? (
-        <div
-          aria-labelledby="format-confirmation-title"
-          aria-modal="true"
+        <Modal
+          labelledBy="format-confirmation-title"
           className="fixed inset-0 z-50 grid place-items-center overscroll-contain bg-slate-950/55 p-4 backdrop-blur-sm"
-          onClick={() => {
-            if (!isExecutingFormat) setPendingFormatConfirmation(null);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Escape" && !isExecutingFormat) {
-              setPendingFormatConfirmation(null);
-            }
-          }}
-          role="dialog"
-          tabIndex={-1}
+          closeOnBackdrop
+          dismissible={!isExecutingFormat}
+          onDismiss={() => setPendingFormatConfirmation(null)}
         >
           <section
             className="w-full max-w-lg rounded-2xl border border-rose-200 bg-white p-6 shadow-2xl dark:border-rose-500/25 dark:bg-slate-900"
@@ -2937,14 +2697,19 @@ function App() {
               </button>
             </div>
           </section>
-        </div>
+        </Modal>
       ) : null}
       {pendingForceReformat ? (
-        <div
-          aria-labelledby="force-reformat-title"
-          aria-modal="true"
+        <Modal
+          labelledBy="force-reformat-title"
           className="fixed inset-0 z-50 grid place-items-center overscroll-contain bg-slate-950/55 p-4 backdrop-blur-sm"
-          role="dialog"
+          dismissible={!isExecutingFormat}
+          onDismiss={() => {
+            setPendingForceReformat(null);
+            setForceReformatPhrase("");
+            setForceReformatError("");
+          }}
+          initialFocus="button"
         >
           <section className="w-full max-w-lg rounded-2xl border border-rose-200 bg-white p-6 shadow-2xl dark:border-rose-500/25 dark:bg-slate-900">
             <p className="mb-1 text-[10px] font-bold tracking-[0.14em] text-rose-700 dark:text-rose-300">
@@ -3015,14 +2780,14 @@ function App() {
               </button>
             </div>
           </section>
-        </div>
+        </Modal>
       ) : null}
       {isCloseConfirmationOpen ? (
-        <div
-          aria-labelledby="close-confirmation-title"
-          aria-modal="true"
+        <Modal
+          labelledBy="close-confirmation-title"
           className="fixed inset-0 z-50 grid place-items-center overscroll-contain bg-slate-950/40 p-4 backdrop-blur-sm"
-          role="dialog"
+          dismissible={!isCancellingForClose}
+          onDismiss={() => setIsCloseConfirmationOpen(false)}
         >
           <section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-slate-900">
             <p className="mb-1 text-[10px] font-bold tracking-[0.14em] text-amber-600 dark:text-amber-300">
@@ -3058,157 +2823,7 @@ function App() {
               </button>
             </div>
           </section>
-        </div>
-      ) : null}
-      {isAutoIngestSetupOpen ? (
-        <div
-          aria-labelledby="auto-ingest-title"
-          aria-modal="true"
-          className="fixed inset-0 z-50 grid place-items-center overscroll-contain bg-slate-950/40 p-4 backdrop-blur-sm"
-          onClick={() => setIsAutoIngestSetupOpen(false)}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") setIsAutoIngestSetupOpen(false);
-          }}
-          role="dialog"
-          tabIndex={-1}
-        >
-          <section
-            className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-slate-900"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <p className="mb-1 text-[10px] font-bold tracking-[0.14em] text-blue-600 dark:text-blue-400">
-                  REGISTERED CARD
-                </p>
-                <h2
-                  id="auto-ingest-title"
-                  className="text-2xl font-semibold tracking-tight"
-                >
-                  Set Up Auto-Ingest
-                </h2>
-                <p className="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                  Configure {selected.name} to begin one verified ingest on a future
-                  matching mount.
-                </p>
-              </div>
-              <button
-                aria-label="Close auto-ingest setup"
-                className="rounded-md px-2 py-1 text-lg leading-none text-slate-500 transition hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white"
-                onClick={() => setIsAutoIngestSetupOpen(false)}
-                type="button"
-              >
-                <X aria-hidden="true" className="size-4" strokeWidth={2.25} />
-              </button>
-            </div>
-            <label className="mt-6 grid gap-2 text-xs font-medium text-slate-600 dark:text-slate-300">
-              Destination directory
-              <span className="flex gap-2">
-                <input
-                  aria-label="Auto-ingest destination directory"
-                  autoComplete="off"
-                  className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2.5 font-mono text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-3 focus:ring-blue-500/10 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100 dark:shadow-inner"
-                  name="auto-ingest-destination-directory"
-                  onChange={(event) => setSelectedDestination(event.target.value)}
-                  placeholder="Choose a destination folder"
-                  spellCheck={false}
-                  value={destination}
-                />
-                <button
-                  aria-label="Choose auto-ingest destination folder"
-                  className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-50 dark:border-slate-700 dark:bg-slate-950 dark:text-blue-300 dark:hover:bg-blue-500/10"
-                  onClick={() => void chooseDestination()}
-                  type="button"
-                >
-                  Choose…
-                </button>
-              </span>
-            </label>
-            {selectedDestinationPickerLabel ? (
-              <p
-                className="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-400"
-                aria-live="polite"
-              >
-                {selectedDestinationPickerLabel}
-              </p>
-            ) : null}
-            <div className="mt-5 grid gap-3 rounded-xl bg-slate-50 p-4 dark:bg-slate-800/70">
-              <label className="flex cursor-pointer items-start gap-3 text-sm text-slate-700 dark:text-slate-200">
-                <input
-                  checked={autoIngestEnabled}
-                  className="mt-0.5 size-4 accent-blue-600"
-                  onChange={(event) => setAutoIngestEnabled(event.target.checked)}
-                  type="checkbox"
-                />
-                <span>
-                  <strong className="block font-semibold">
-                    Ingest Automatically on Mount
-                  </strong>
-                  <span className="mt-1 block text-xs leading-5 text-slate-500 dark:text-slate-400">
-                    Requires a fresh exact marker match and the destination above to
-                    remain available.
-                  </span>
-                </span>
-              </label>
-              <label className="flex cursor-pointer items-start gap-3 text-sm text-slate-700 opacity-100 dark:text-slate-200">
-                <input
-                  checked={autoFormatEnabled}
-                  className="mt-0.5 size-4 accent-blue-600 disabled:cursor-not-allowed"
-                  disabled={!autoIngestEnabled}
-                  onChange={(event) => setAutoFormatEnabled(event.target.checked)}
-                  type="checkbox"
-                />
-                <span className={!autoIngestEnabled ? "opacity-45" : ""}>
-                  <strong className="block font-semibold">
-                    Format After a Verified Auto-Ingest
-                  </strong>
-                  <span className="mt-1 block text-xs leading-5 text-slate-500 dark:text-slate-400">
-                    Only runs when the native safety gates and platform format provider
-                    allow it.
-                  </span>
-                </span>
-              </label>
-            </div>
-            <div className="mt-5 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200">
-              <TriangleAlert
-                aria-hidden="true"
-                className="mt-0.5 size-4 shrink-0"
-                strokeWidth={2.25}
-              />
-              <p className="m-0">
-                The card marker is mutable continuity evidence, not immutable identity.
-                Managed-card formatting additionally requires a fresh verified ingest, a
-                matching compact content witness, the current mount, and the native
-                format provider. A copied marker can still defeat this mode.
-              </p>
-            </div>
-            {registrationLabel ? (
-              <p
-                className="mt-4 text-xs text-slate-500 dark:text-slate-400"
-                aria-live="polite"
-              >
-                {registrationLabel}
-              </p>
-            ) : null}
-            <div className="mt-6 flex justify-end gap-3">
-              <button
-                className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-                onClick={() => setIsAutoIngestSetupOpen(false)}
-                type="button"
-              >
-                Cancel
-              </button>
-              <button
-                className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-45"
-                disabled={!destination.trim() || isCopying || !selected.ingestable}
-                onClick={() => void registerCard()}
-                type="button"
-              >
-                Save Setup
-              </button>
-            </div>
-          </section>
-        </div>
+        </Modal>
       ) : null}
       {dockOperations.length ? (
         <section
@@ -3331,6 +2946,7 @@ function App() {
         <span>Local-first · native removable-media inventory</span>
         <span>Desktop-only · local-first</span>
       </footer>
+      {configurationDialog}
     </main>
   );
 }
