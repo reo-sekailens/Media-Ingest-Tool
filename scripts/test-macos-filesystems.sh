@@ -44,6 +44,7 @@ for filesystem in APFS APFSX ExFAT; do
   # These execute the production byte-copy/readback/publication/receipt path.
   # Symlink-dependent tests belong to APFS; exFAT does not support symlinks.
   for test in \
+    mac_destination_primitives_report_native_support \
     verified_copy_independently_hashes_and_commits \
     mac_publication_preserves_a_competing_file_and_the_verified_partial \
     mac_publication_refuses_existing_receipts_and_dangling_symlinks \
@@ -53,7 +54,7 @@ for filesystem in APFS APFSX ExFAT; do
     recovery_rehashes_an_existing_final_file_and_rejects_mutation \
     receipt_is_written_as_versioned_json; do
     TMPDIR="$task_mount/fixtures" cargo test --locked --manifest-path src-tauri/Cargo.toml \
-      "ingest::tests::$test" -- --exact --test-threads=1
+      "ingest::tests::$test" -- --exact --test-threads=1 --nocapture
   done
   /usr/bin/hdiutil detach "$task_mount"
 done

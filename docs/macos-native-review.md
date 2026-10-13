@@ -57,13 +57,41 @@ metadata type-checking for both Apple targets using `rustc --edition 2021 --test
 This checks target-specific Rust types and declarations; it does not link Apple
 frameworks, compare against installed SDK headers, or execute the tests.
 
-Five discovery adapter tests also pass in a temporary Windows projection harness
+Six discovery adapter tests also pass in a temporary Windows projection harness
 using copies of the production identity, marker and discovery modules, changing
 only discovery's platform `cfg` selectors to enable the macOS adapter. The native
 `diskutil` test was excluded. This verifies parser/projection logic, source-file
 preservation, marker absence, disappeared-root handling and read-error states on
 the Windows filesystem; it does not execute a Mac utility, mount a read-only
 volume, or reproduce TCC. The harness's strict all-target Clippy check passes.
+
+## Runner-discovered virtual-source correction
+
+[Quality run 38343853933](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38343853933)
+for source `064700eeb6e25c1d4998c2643768d55849657a64` produced sanitized
+read-only admission evidence on all four UI runners. macOS 15 Intel reported six
+mounted candidates and one admitted image; macOS 15 ARM64 reported nine mounted
+candidates and one admitted image; macOS 26 Intel reported 14 mounted candidates
+and nine admitted images; macOS 26 ARM64 reported 22 mounted candidates and 14
+admitted images. Every admitted entry was APFS and reported `BusProtocol = Disk Image`,
+`Internal = false`, removable/ejectable booleans true, and no
+`VirtualOrPhysical` field. No system-root candidate was admitted. These are
+volume classifications from the installed utility; no volume labels, mount
+paths, UUIDs, disk identifiers, serials, capacities or raw logs were retained in
+the diagnostic JSON or copied here.
+
+The source adapter previously rejected only a `VirtualOrPhysical = Virtual`
+string, so these images bypassed its intended virtual-media exclusion. It now
+also rejects the exact case-insensitive `BusProtocol = Disk Image` enum. A
+runner-shaped regression keeps the absent virtual field and read-only/removable
+flags, rejects the image, then substitutes `USB` and proves the readable
+read-only physical-source policy remains eligible. Diagnostic policy mirrors
+this additional reason for the next native validation. The fix does not impose
+an empty-inventory expectation or hide other external volumes.
+
+The admission correction is locally tested source behavior until a later
+source-specific native runner snapshot verifies its result. These observed
+counts vary by runner/run and do not certify any physical card.
 
 ## Read-only source flow
 

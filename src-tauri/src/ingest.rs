@@ -1631,6 +1631,34 @@ pub(crate) mod tests {
         worker.join().expect("worker");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_destination_primitives_report_native_support() {
+        let root = std::env::temp_dir().join(format!("ingest-primitives-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("probe directory");
+        let partial = root.join("verified.partial");
+        let final_path = root.join("published.bin");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
+            .expect("probe file");
+        file.write_all(b"native filesystem probe")
+            .expect("probe bytes");
+        let flush = file.sync_all();
+        println!("native File::sync_all: {flush:?}");
+        drop(file);
+        let publication = publish_verified_file(&partial, &final_path);
+        println!("native exclusive publication: {publication:?}");
+        flush.expect("native File::sync_all stage");
+        publication.expect("native exclusive publication stage");
+        assert_eq!(
+            fs::read(&final_path).expect("probe readback"),
+            b"native filesystem probe"
+        );
+        fs::remove_dir_all(root).expect("probe cleanup");
+    }
+
     #[test]
     fn verified_copy_independently_hashes_and_commits() {
         let root = std::env::temp_dir().join(format!("ingest-test-{}", Uuid::new_v4()));

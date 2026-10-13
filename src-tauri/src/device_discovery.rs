@@ -1038,13 +1038,18 @@ mod platform {
             // `RemovableMediaOrExternalDevice`. Preserve the older/component
             // spellings as defensive compatibility aliases. An SD card behind
             // a USB reader is normally a mounted partition under `Partitions`,
-            // not a whole-disk entry. Explicitly virtual disks never qualify.
+            // not a whole-disk entry. Real runner evidence shows mounted APFS
+            // images can omit VirtualOrPhysical and still report removable and
+            // ejectable; their explicit Disk Image protocol must also exclude
+            // them. Read-only physical cards remain valid source media.
             removable: (boolean(dictionary, "RemovableMediaOrExternalDevice")
                 || boolean(dictionary, "RemovableMediaOrExternal")
                 || boolean(dictionary, "RemovableMedia")
                 || boolean(dictionary, "Ejectable"))
                 && !string(dictionary, "VirtualOrPhysical")
-                    .is_some_and(|kind| kind.eq_ignore_ascii_case("virtual")),
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("virtual"))
+                && !string(dictionary, "BusProtocol")
+                    .is_some_and(|protocol| protocol.eq_ignore_ascii_case("Disk Image")),
             // Missing external/internal evidence must never default to an
             // external device eligible for source or safe-eject selection.
             internal: dictionary.get("Internal")?.as_boolean()?,
@@ -1176,6 +1181,34 @@ mod platform {
             value.insert("Internal".into(), Value::Boolean(false));
             value.remove("DeviceIdentifier");
             assert!(disk_info_from_plist(&value).is_none());
+        }
+
+        #[test]
+        fn disk_images_with_missing_virtual_kind_are_not_physical_read_only_cards() {
+            let mut dictionary = Value::from_reader_xml(
+                br#"<?xml version="1.0"?><plist version="1.0"><dict>
+                    <key>TotalSize</key><integer>1024</integer>
+                    <key>DeviceIdentifier</key><string>disk4s1</string>
+                    <key>MountPoint</key><string>/Volumes/TEST</string>
+                    <key>RemovableMediaOrExternalDevice</key><true/>
+                    <key>Ejectable</key><true/><key>Internal</key><false/>
+                    <key>WritableVolume</key><false/>
+                    <key>BusProtocol</key><string>Disk Image</string>
+                    <key>FilesystemType</key><string>apfs</string>
+                </dict></plist>"#
+                    .as_slice(),
+            )
+            .expect("runner-shaped disk image fixture")
+            .into_dictionary()
+            .expect("fixture dictionary");
+            let image = disk_info_from_plist(&dictionary).expect("complete mounted image info");
+            assert!(!image.removable);
+            assert!(!image.matches_mounted_source("disk4s1", "/Volumes/TEST"));
+
+            dictionary.insert("BusProtocol".into(), Value::String("USB".into()));
+            let card = disk_info_from_plist(&dictionary).expect("read-only physical source info");
+            assert!(card.removable);
+            assert!(card.matches_mounted_source("disk4s1", "/Volumes/TEST"));
         }
 
         #[test]

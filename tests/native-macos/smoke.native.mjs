@@ -119,6 +119,7 @@ describe("macOS native startup and read-only workspace", () => {
         protocol: window.location.protocol,
         stylesheetCount: document.styleSheets.length,
         backgroundColor: styles.backgroundColor,
+        backgroundImage: styles.backgroundImage,
         width: main.getBoundingClientRect().width,
         fixtureMocks: Boolean(window.__wdio_mocks__),
         overflow:
@@ -130,7 +131,11 @@ describe("macOS native startup and read-only workspace", () => {
     assert.equal(renderer.identifier, "com.mediaingest.tool.macos-ui-tests");
     assert.equal(renderer.protocol, "tauri:", "Bundled app must use its native origin");
     assert.ok(renderer.stylesheetCount > 0, "Bundled CSS must load under the app CSP");
-    assert.notEqual(renderer.backgroundColor, "rgba(0, 0, 0, 0)");
+    assert.ok(
+      renderer.backgroundColor !== "rgba(0, 0, 0, 0)" ||
+        renderer.backgroundImage !== "none",
+      "The bundled stylesheet must render a color or gradient background",
+    );
     assert.ok(renderer.width >= 960, "The declared desktop minimum width must apply");
     assert.equal(renderer.fixtureMocks, false, "No command mocks may be installed");
     assert.equal(renderer.overflow, false, "Native workspace must not overflow");
@@ -230,6 +235,7 @@ describe("macOS native startup and read-only workspace", () => {
       if (document.activeElement instanceof window.HTMLElement) {
         document.activeElement.blur();
       }
+      window.scrollTo(0, 0);
       const targets = new Set(
         document.querySelectorAll(
           '#device-title, [aria-label="Connected media"] li strong, .workspace-content dd, [aria-label="Saved configuration"] p, [aria-label="Saved configuration"] span, [aria-label="Saved configuration"] strong, .workspace-content input, .workspace-content textarea',

@@ -77,6 +77,11 @@ test("admission mirrors source guards without requiring a writable source", () =
     "explicitVirtual",
   );
   assert.equal(
+    admission({ ...info, BusProtocol: "Disk Image" }, "disk4s1", info.MountPoint)
+      .reason,
+    "diskImageProtocol",
+  );
+  assert.equal(
     admission({ ...info, Internal: true }, "disk4s1", info.MountPoint).reason,
     "internal",
   );
@@ -122,9 +127,8 @@ test("collector reports an admitted system root rather than assuming an empty ru
             TotalSize: 1024,
             Internal: false,
             RemovableMediaOrExternalDevice: true,
-            Virtual: true,
             FilesystemType: "apfs",
-            BusProtocol: "Disk Image",
+            BusProtocol: "USB",
             VolumeName: "PRIVATE_VOLUME_NAME",
             VolumeUUID: "PRIVATE_UUID",
           };

@@ -165,6 +165,9 @@ export function admission(info, listIdentifier, listMount, probeRoot = rootReadA
     explicitlyVirtual:
       typeof info.VirtualOrPhysical === "string" &&
       info.VirtualOrPhysical.toLowerCase() === "virtual",
+    diskImageProtocol:
+      typeof info.BusProtocol === "string" &&
+      info.BusProtocol.toLowerCase() === "disk image",
   };
   let reason;
   if (!observations.hasUnsignedCapacity) reason = "missingCapacity";
@@ -173,6 +176,7 @@ export function admission(info, listIdentifier, listMount, probeRoot = rootReadA
   else if (!observations.identifierMatchesList) reason = "identifierChanged";
   else if (!observations.mountMatchesList) reason = "mountChanged";
   else if (observations.explicitlyVirtual) reason = "explicitVirtual";
+  else if (observations.diskImageProtocol) reason = "diskImageProtocol";
   else if (!observations.hasRemovableOrExternalEvidence)
     reason = "notRemovableOrExternal";
   else if (info.Internal) reason = "internal";
