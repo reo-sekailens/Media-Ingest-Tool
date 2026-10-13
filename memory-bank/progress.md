@@ -12,6 +12,12 @@
   [macOS compatibility](../docs/macos-compatibility.md) for scope and evidence.
   Physical media, TCC/quarantine/keyboard, sleep/wake, oldest runtime and Mac
   quick-format implementation remain outside available evidence.
+- Native images exposed an ExFAT publication capability limit: full file sync
+  succeeds, but `RENAME_EXCL` returns ENOTSUP. Added a precise unsupported
+  destination response and APFS guidance, retaining source/partial data.
+  ExFAT-to-APFS production ingestion/receipt/SQLite/marker checks are separate
+  from the expected ExFAT-destination rejection. Disk images with missing
+  virtual/physical metadata are excluded through their native bus protocol.
 
 - Added selectable Camera time (default) and Computer local time to card
   configuration, review, and the applied workspace. A shared warning requires

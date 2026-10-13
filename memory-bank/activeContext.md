@@ -17,6 +17,11 @@
   no-replace rename; exact root OS metadata is excluded consistently. Nested new
   destinations resolve safely through the existing ancestor. File-backed Mac
   SQLite verifies WAL/FULL and enables/verifies fullfsync after reopen.
+- Native disk-image observations exposed a missing virtual/physical field;
+  discovery now rejects the exact Disk Image bus protocol. ExFAT full flush
+  succeeded, but exclusive rename returned ENOTSUP. Mac destinations use
+  APFS/APFSX; ExFAT source ingestion and marker writing are tested separately.
+  Unsupported publication preserves source/partial data and returns APFS guidance.
 - Quality now covers macOS 15/26 Intel/ARM, disposable APFS/APFSX/exFAT tests,
   independently checked DMG installation/startup and native WKWebView/read-only
   IPC. UI instrumentation is debug-only, separate-ID, loopback-only, and rejected

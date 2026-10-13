@@ -5160,11 +5160,16 @@ mod tests {
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "requires disposable exFAT and APFS image roots supplied by the macOS filesystem script"]
     fn mac_exfat_source_completes_on_apfs_destination() {
-        use std::os::unix::fs::MetadataExt;
+        // Compile the full integration body on every host, but execute only
+        // against the explicitly supplied native Mac filesystem fixtures.
+        assert_eq!(
+            std::env::consts::OS,
+            "macos",
+            "native macOS fixtures required"
+        );
 
         let image_root = |variable: &str, expected_filesystem: &str| {
             let root = PathBuf::from(std::env::var_os(variable).expect(variable))
@@ -5191,13 +5196,17 @@ mod tests {
         };
         let exfat_root = image_root("MEDIA_INGEST_TEST_EXFAT_ROOT", "exfat");
         let apfs_root = image_root("MEDIA_INGEST_TEST_APFS_ROOT", "apfs");
-        assert_ne!(
-            std::fs::metadata(&exfat_root)
-                .expect("exFAT metadata")
-                .dev(),
-            std::fs::metadata(&apfs_root).expect("APFS metadata").dev(),
-            "source and destination must use distinct mounted filesystems"
-        );
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_ne!(
+                std::fs::metadata(&exfat_root)
+                    .expect("exFAT metadata")
+                    .dev(),
+                std::fs::metadata(&apfs_root).expect("APFS metadata").dev(),
+                "source and destination must use distinct mounted filesystems"
+            );
+        }
         let operation_id = uuid::Uuid::new_v4().to_string();
         let owned_name = format!("mit-cross-filesystem-{operation_id}");
         let source = exfat_root.join(&owned_name);
@@ -5220,7 +5229,7 @@ mod tests {
             std::fs::write(&path, bytes).expect("owned source fixture");
             original_metadata.push(std::fs::metadata(path).expect("original source metadata"));
         }
-        let expected_bytes = fixtures.iter().map(|(_, bytes)| bytes.len() as u64).sum();
+        let expected_bytes: u64 = fixtures.iter().map(|(_, bytes)| bytes.len() as u64).sum();
         let prepared = prepare_verified_ingest(
             VerifiedIngestRequest {
                 operation_id: Some(operation_id.clone()),

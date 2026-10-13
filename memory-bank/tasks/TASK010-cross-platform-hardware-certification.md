@@ -1,6 +1,6 @@
 # TASK010 — Cross-platform, filesystem, and hardware certification
 
-- **Status:** planned
+- **Status:** in progress — native Intel/ARM macOS software, filesystem-image, UI and package evidence is being collected; physical certification remains partial or blocked.
 - **Depends on:** TASK002, TASK003, TASK004, TASK005, TASK006, TASK008, TASK009
 - **Unlocks:** TASK011
 
@@ -12,7 +12,7 @@ Prove behavior with automated fixtures and real sacrificial media on every decla
 
 - Windows 10/11, macOS on Intel and Apple silicon where supported, and Linux with udev/UDisks2; exact minimum versions and CPU architectures must be frozen in TASK011.
 - Source filesystems: FAT16 where applicable, FAT32, exFAT, read-only media, corrupt/dirty media, and unsupported filesystems.
-- Destinations: NTFS, APFS, exFAT, and ext4 plus a documented network-volume policy.
+- Destinations: NTFS, APFS, exFAT, and ext4 plus a documented network-volume policy. Mac exFAT destinations are currently blocked because native exclusive rename is unsupported; exFAT sources to APFS remain in the permitted workflow.
 - Readers: built-in SD slot, generic single-slot USB reader, SanDisk Professional SD/microSD models named in TASK006, PRO-DOCK if in scope, and two identical readers connected simultaneously.
 - Cards: at least two SD and two microSD cards, including two cards with the same vendor/product/capacity; only sacrificial cards may be formatted.
 - Failures: source/destination unplug, read error, write error, full destination, permission denial, sleep/wake, app crash, reboot, hash mismatch, metadata corruption, and duplicate paths.
