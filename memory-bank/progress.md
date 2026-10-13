@@ -16,8 +16,8 @@
 - Guarded organization-preview paths/status by source identity/generation/root,
   full applied settings, and latest request; saving invalidates pending requests.
   Obsolete Camera-time results cannot appear under Computer-local settings or
-  supply an old ingest operation ID. Eight deferred/source-scope regressions pass.
-- All 99 frontend tests, TypeScript, ESLint, production build, formatting, and
+  supply an old ingest operation ID. Nine deferred/source-scope regressions pass.
+- All 100 frontend tests, TypeScript, ESLint, production build, formatting, and
   memory-bank validation pass. Isolated staged Rust fmt, strict all-target Clippy,
   and all-target tests pass: 126 native tests, seven physical cases ignored.
   Real TIFF EXIF tests exercise 2,879 minute offsets; conversion covers all civil
@@ -27,6 +27,14 @@
   clock independence, and frozen recovery pass. Chromium responsive fixtures
   confirm the two choices, warning, save/cancel/reopen, and no console/overflow
   issues. Native IPC, physical cards, and a broad camera corpus remain unverified.
+- Native checks for runtime source `b26bda2` pass on Windows (126 passed,
+  seven hardware cases ignored), macOS (125/five), and Linux (122/five) in
+  [run 38337261580](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38337261580).
+  A hosted Windows frontend test exposed startup-fixture setup ambiguity; tests
+  now wait for native identity before accepting saved settings. A controlled
+  delayed-discovery regression rejects stale fixture results and permits the
+  normal native preview. All 100 frontend tests pass locally; runtime is unchanged.
+
 - Changed interval-child names to capture-clock ranges such as
   `1300-1400+0800`, below the separate capture-date folder. Starts are included,
   ends excluded, and final intervals clip at `2400`. Unknown offsets stay

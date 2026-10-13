@@ -23,9 +23,9 @@
   frozen destination paths regardless of current timezone or preferences.
 - Pending preview responses now require the exact source/generation/root,
   applied-settings signature, and latest request. Saving invalidates pending
-  tokens before applying changes. Eight regressions cover stale responses/errors,
+  tokens before applying changes. Nine regressions cover stale responses/errors,
   newer requests, and card changes; obsolete paths/operation IDs cannot reappear.
-- Verification passes: all 99 frontend tests, TypeScript, ESLint, production build,
+- Verification passes: all 100 frontend tests, TypeScript, ESLint, production build,
   formatting, memory-bank validation, and isolated staged Rust fmt/strict Clippy
   with all-target native tests (126 passed, seven physical hardware cases ignored).
   Actual TIFF EXIF checks cover 2,879 numeric minute offsets; injected conversion
@@ -40,6 +40,16 @@
   without deleting the old cache. This does not establish physical-card saving,
   native IPC/webview rendering, or a broad real-camera format corpus. Host timezone
   rules remain supplied by the OS; versions can differ for newly created plans.
+
+- [Hosted native checks in run 38337261580](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38337261580)
+  pass for runtime source `b26bda2446eaaf0eea8f4ed549f76ddb189ba6b7`: Windows
+  126 passed/seven hardware cases ignored, macOS 125/five, Linux 122/five. Every
+  runner passes the real-file both-basis copy, exhaustive EXIF offsets, injected
+  DST, OriginalTree, profile migration, and frozen-recovery checks. That run's
+  Windows frontend exposed a regression setup race: saved destination text could
+  belong to startup fixtures. Scope tests now await native identity; a controlled
+  delayed-discovery test proves stale fixture previews are discarded and a valid
+  native preview succeeds. Production code is unchanged by this test correction.
 
 ### 2026-10-13 capture-hour range folders
 

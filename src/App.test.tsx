@@ -618,6 +618,83 @@ test.each(["success", "rejection"] as const)(
   },
 );
 
+test("a hydrated preview fixture cannot adopt a delayed result after native startup discovery", async () => {
+  const { state, handler } = nativeConfigurationRuntime();
+  state.profile = {
+    ...unregisteredProfile(),
+    registered: true,
+    destinationPath: "D:/Saved",
+    sortMode: "camera_day",
+    captureTimeBasis: "camera_recorded",
+    markerStatus: "recognized",
+  };
+  let resolveSnapshot!: (result: unknown) => void;
+  const startupSnapshot = new Promise((resolve) => {
+    resolveSnapshot = resolve;
+  });
+  let resolveFixturePreview!: (result: unknown) => void;
+  const fixturePreview = new Promise((resolve) => {
+    resolveFixturePreview = resolve;
+  });
+  tauri.invoke.mockImplementation(
+    (command: string, args?: { request?: Record<string, unknown> }) => {
+      if (command === "get_device_snapshot") return startupSnapshot;
+      if (command === "preview_verified_ingest") {
+        if (args?.request?.sourceMediumKey === "cam-a") return fixturePreview;
+        return Promise.resolve({
+          data: {
+            operationId: args?.request?.operationId,
+            fileCount: 1,
+            totalBytes: 512,
+            sampleDestinationPaths: ["native-startup/PHOTO.JPG"],
+          },
+          error: null,
+        });
+      }
+      return handler(command);
+    },
+  );
+  render(<App />);
+  // Destination text alone can become visible before native discovery completes:
+  // this mock permits saved-profile hydration of the initial preview fixture.
+  await screen.findByText("D:/Saved");
+  expect(screen.getByRole("heading", { name: "A-Cam • SDXC" })).toBeVisible();
+  expect(
+    screen.queryByRole("heading", { name: "hardware:config-a" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Preview Organization" }));
+  const fixtureRequest = tauri.invoke.mock.calls.find(
+    ([command]) => command === "preview_verified_ingest",
+  )?.[1].request;
+  expect(fixtureRequest.sourceMediumKey).toBe("cam-a");
+  await act(async () => {
+    resolveSnapshot({ data: state.snapshot });
+  });
+  await screen.findByRole("heading", { name: "hardware:config-a" });
+  await screen.findByText("D:/Saved");
+  await act(async () => {
+    resolveFixturePreview({
+      data: {
+        operationId: fixtureRequest.operationId,
+        fileCount: 1,
+        totalBytes: 512,
+        sampleDestinationPaths: ["stale-startup-fixture/PHOTO.JPG"],
+      },
+      error: null,
+    });
+  });
+  expect(screen.queryByText("stale-startup-fixture/PHOTO.JPG")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Preview Organization" }));
+  expect(await screen.findByText("native-startup/PHOTO.JPG")).toBeVisible();
+  const nativeRequest = tauri.invoke.mock.calls.find(
+    ([command, args]) =>
+      command === "preview_verified_ingest" &&
+      args.request.sourceMediumKey === "hardware:config-a",
+  )?.[1].request;
+  expect(nativeRequest.sourceMediumKey).toBe("hardware:config-a");
+  expect(nativeRequest.operationId).not.toBe(fixtureRequest.operationId);
+});
+
 test.each([
   ["generation", "hardware:config-a", 2, "F:\\"],
   ["source root", "hardware:config-a", 1, "G:\\"],
@@ -655,6 +732,7 @@ test.each([
       },
     );
     render(<App />);
+    await screen.findByRole("heading", { name: "hardware:config-a" });
     await screen.findByText("D:\\Saved");
     fireEvent.click(screen.getByRole("button", { name: "Preview Organization" }));
     expect(await screen.findByText("previous-source/PHOTO.JPG")).toBeVisible();

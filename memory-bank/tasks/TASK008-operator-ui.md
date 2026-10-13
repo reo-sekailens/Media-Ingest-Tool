@@ -29,15 +29,22 @@ warnings; an invalid saved basis exposes controls so it can be corrected.
 
 Draft cancel leaves applied settings unchanged. Card saves, legacy hydration,
 computer-local hydration, preview, manual ingest, and future-mount automatic
-ingest are covered by typed integration tests. All 99 frontend tests, TypeScript,
+ingest are covered by typed integration tests. All 100 frontend tests, TypeScript,
 ESLint, production build, and source formatting pass. Chromium fixture QA at
 1440x1000, 390x844, and 720x500 covers keyboard selection, review/save/reopen,
 Escape discard, scrolling and visible actions, with no horizontal overflow or
 console errors. Light desktop, dark mobile, review, and saved-workspace screenshots are retained
 outside Git. Preview paths/status are scoped to the exact source, applied
-settings, and latest request; saving invalidates pending tokens. Eight regressions
+settings, and latest request; saving invalidates pending tokens. Nine regressions
 cover deferred stale responses/errors, newer previews, and source changes. Playwright CLI was used because the Browser plugin was unavailable.
 This is fixture-rendered evidence, not packaged/native IPC or physical-card proof.
+
+The Windows hosted run exposed a test setup race: destination text alone could
+belong to an initial fixture before native inventory arrived. Scope tests now
+await the observed native heading first. A controlled deferred-startup regression
+proves stale fixture results are rejected and a fresh native preview succeeds.
+No production guard was changed or timeout increased. Five focused repetitions
+(20 cases) and the complete 100-test frontend suite pass locally.
 
 ### 2026-10-13 step configuration
 
