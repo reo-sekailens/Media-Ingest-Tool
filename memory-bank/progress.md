@@ -27,13 +27,14 @@
   clock independence, and frozen recovery pass. Chromium responsive fixtures
   confirm the two choices, warning, save/cancel/reopen, and no console/overflow
   issues. Native IPC, physical cards, and a broad camera corpus remain unverified.
-- Native checks for runtime source `b26bda2` pass on Windows (126 passed,
-  seven hardware cases ignored), macOS (125/five), and Linux (122/five) in
-  [run 38337261580](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38337261580).
-  A hosted Windows frontend test exposed startup-fixture setup ambiguity; tests
-  now wait for native identity before accepting saved settings. A controlled
-  delayed-discovery regression rejects stale fixture results and permits the
-  normal native preview. All 100 frontend tests pass locally; runtime is unchanged.
+- [Hosted Quality run 38337823193](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38337823193)
+  passes for `d08a4ce`: each OS has 100 frontend tests plus packaging safeguards;
+  native checks pass on Windows (126 tests/seven physical cases ignored), macOS
+  (125/five), and Linux (122/five), including both-basis real-file copy checks.
+  The macOS unsigned app/DMG smoke bundle builds and is uploaded. A controlled
+  startup regression verifies exact native identity before accepting saved
+  fixture settings; obsolete fixture previews are discarded. Physical hardware
+  and packaged/native rendered behavior remain separate gates.
 
 - Changed interval-child names to capture-clock ranges such as
   `1300-1400+0800`, below the separate capture-date folder. Starts are included,

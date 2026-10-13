@@ -46,6 +46,13 @@ proves stale fixture results are rejected and a fresh native preview succeeds.
 No production guard was changed or timeout increased. Five focused repetitions
 (20 cases) and the complete 100-test frontend suite pass locally.
 
+[Hosted Quality run 38337823193](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38337823193)
+passes for source `d08a4ce` on all three OSes: 100 frontend tests each, native
+Windows 126 passed/seven physical cases ignored, macOS 125/five, and Linux
+122/five. The real-file both-basis copy check passes on every runner. The macOS
+unsigned app/DMG smoke package also builds. Hardware and packaged native UI
+certification are not established by runner tests or browser fixtures.
+
 ### 2026-10-13 step configuration
 
 The selected card now uses one draft-based dialog for Destination, Organization,

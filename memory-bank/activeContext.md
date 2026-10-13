@@ -41,15 +41,17 @@
   native IPC/webview rendering, or a broad real-camera format corpus. Host timezone
   rules remain supplied by the OS; versions can differ for newly created plans.
 
-- [Hosted native checks in run 38337261580](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38337261580)
-  pass for runtime source `b26bda2446eaaf0eea8f4ed549f76ddb189ba6b7`: Windows
-  126 passed/seven hardware cases ignored, macOS 125/five, Linux 122/five. Every
-  runner passes the real-file both-basis copy, exhaustive EXIF offsets, injected
-  DST, OriginalTree, profile migration, and frozen-recovery checks. That run's
-  Windows frontend exposed a regression setup race: saved destination text could
-  belong to startup fixtures. Scope tests now await native identity; a controlled
+- [Hosted Quality run 38337823193](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38337823193)
+  succeeds for source `d08a4ce89c33d589b2613ab2219cc63fb8266f54`. Each OS passes
+  100 frontend tests and packaging safeguards. Native fmt, strict Clippy, and
+  all-target tests pass on Windows (126 passed/seven physical cases ignored),
+  macOS (125/five), and Linux (122/five), including real-file both-basis copying.
+  The macOS unsigned app/DMG smoke bundle builds and is uploaded. This is runner
+  and core evidence, not physical hardware or native rendered-UI certification.
+- A hosted Windows regression setup initially accepted saved destination text
+  from startup fixtures. Scope tests now await native identity; a controlled
   delayed-discovery test proves stale fixture previews are discarded and a valid
-  native preview succeeds. Production code is unchanged by this test correction.
+  native preview succeeds. No production guard or timeout changed for that fix.
 
 ### 2026-10-13 capture-hour range folders
 
