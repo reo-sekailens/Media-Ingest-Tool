@@ -19,6 +19,13 @@
   hardware tests ignored in the isolated staged snapshot). Chromium hour-selection screenshot
   QA passes with visible actions and no overflow or console errors.
 
+- [Hosted Quality run 38331318345](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38331318345)
+  passes for `453411b53a1427d2be6d5baad9deb31bb99f3340`, including frontend,
+  strict native checks, the real EXIF-file range-copy test on all three OSes,
+  and the macOS app/DMG smoke build. Native counts: Windows 110 passed/seven
+  hardware cases ignored; macOS 109/five; Linux 106/five. Hardware and packaged
+  desktop execution remain separate from the runner evidence.
+
 - Replaced the inline configuration and separate automation setup with a single
   Destination/Organization/Automation/Review dialog and explicit Save. The main
   page shows a compact applied summary. Back retains drafts; Cancel/Escape

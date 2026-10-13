@@ -189,6 +189,14 @@ Ship conservative defaults, expose advanced overrides only after tests, and stor
   Physical-card, native-IPC, cross-platform runtime, and SQLite completion
   certification are not established by this local fixture check.
 
+- 2026-10-13 — [Hosted Quality run 38331318345](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38331318345)
+  passes for exact source `453411b53a1427d2be6d5baad9deb31bb99f3340`.
+  Frontend/native checks and the real EXIF-file hour-range regression pass on
+  Windows, macOS, and Linux. Native results are 110/seven ignored, 109/five,
+  and 106/five respectively; ignored cases require physical hardware. The
+  macOS app/DMG smoke build passes. Runner execution and generated packages
+  do not establish physical-card or packaged desktop certification.
+
 - 2026-08-28 — The operator UI exposes capture-time sorting as selectable
   EXIF day, EXIF hour, custom-minute, and original-tree tags, including an
   explicit destination-depth display. The planner accepts arbitrary bounded

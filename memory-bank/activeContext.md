@@ -23,6 +23,12 @@
   tests pass (110 passed, seven hardware tests ignored in the isolated staged snapshot).
   Chromium fixture QA shows the hour selection/example with visible actions,
   no overflow, and no console errors. Screenshot evidence is outside Git.
+- [Hosted Quality run 38331318345](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38331318345)
+  passes for source `453411b53a1427d2be6d5baad9deb31bb99f3340`. Frontend and
+  native checks pass on every OS. The real EXIF-file hour-range test passes on
+  Windows (110 native tests passed, seven hardware cases ignored), macOS (109,
+  five ignored), and Linux (106, five ignored). The macOS app/DMG smoke package
+  also builds. This remains runner/core evidence rather than hardware proof.
 - Range naming applies to new plans. Existing published files stay in place;
   recovery uses its saved paths. Evidence is local real-file core execution and
   mocked frontend command wiring, not a fresh physical-card, native IPC,
