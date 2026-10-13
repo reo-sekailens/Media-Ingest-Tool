@@ -31,6 +31,15 @@ Treat attached media and all path/metadata content as untrusted, constrain the T
 
 ## Verification evidence
 
+- 2026-10-13 macOS publication now uses OS-atomic exclusive rename for media and
+  receipts, resolving the Mac no-overwrite gap below subject to native filesystem
+  checks. Linux no-replace publication and handle-based anti-race traversal remain
+  distinct follow-up work. Native UI tests use an optional Mac-only debug driver,
+  a separate application identifier and explicit environment opt-in; release
+  compilation rejects the feature. Production frontend capabilities remain
+  unchanged. Driver transport tests pass without additional JS dependencies;
+  actual Mac WKWebView/IPC results await hosted execution.
+
 - 2026-10-09 source review: Unix destination publication still checks for an
   existing final path before a potentially replacing rename. Implement and
   qualify a platform-appropriate atomic no-overwrite primitive; an earlier

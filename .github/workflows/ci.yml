@@ -113,7 +113,7 @@ jobs:
         if: runner.os == 'macOS'
         run: bash ../scripts/test-macos-filesystems.sh
       - name: Capture installed macOS diskutil reference
-        if: runner.os == 'macOS'
+        if: always() && runner.os == 'macOS'
         run: |
           mkdir -p "$RUNNER_TEMP/macos-native-evidence"
           /usr/bin/sw_vers > "$RUNNER_TEMP/macos-native-evidence/os-version.txt"
@@ -128,7 +128,6 @@ jobs:
 
   macos-native-ui:
     name: macOS WKWebView (${{ matrix.os }})
-    needs: [frontend, rust]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     strategy:
@@ -186,7 +185,6 @@ jobs:
 
   macos-package:
     name: macOS manual-install package (${{ matrix.os }})
-    needs: [frontend, rust]
     if: ${{ !inputs.check-only }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60

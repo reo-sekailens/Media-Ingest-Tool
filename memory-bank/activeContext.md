@@ -248,11 +248,11 @@ Implement the remaining TASK004 recovery/durability boundaries alongside conserv
   remain required.
 
 - macOS discovery now descends from whole disks into `Partitions` and
-  `APFSVolumes`, where mounted card volumes appear. It accepts the structured
-  `RemovableMediaOrExternalDevice` and `WritableVolume` evidence emitted by
-  `diskutil info -plist`, retains virtual/internal exclusions, and emits no
-  candidate without explicit writable evidence. Windows-local Rust verification
-  passes; an Apple-native compile and reader-backed SD-card run remain required.
+  `APFSVolumes`, where mounted card volumes appear. The earlier writable-only
+  admission was superseded on 2026-10-13: structured external/internal and
+  matching id/mount evidence plus an actual readable directory check admit
+  write-protected sources. Permission denial/unavailability block ingestion;
+  discovery performs no marker writes. Physical reader-backed checks remain open.
 
 - macOS support diagnostics now persist automatically through Tauri's native
   OS log directory. The Rust boundary records redacted lifecycle, discovery,

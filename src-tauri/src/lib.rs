@@ -4531,8 +4531,13 @@ mod tests {
 
     #[test]
     fn source_inventory_requires_the_current_medium_and_mount_pairing() {
+        let mount = if cfg!(windows) {
+            "F:\\"
+        } else {
+            "/Volumes/CARD"
+        };
         let volume = device_discovery::volume_from_parts(
-            "F:\\".into(),
+            mount.into(),
             "CARD".into(),
             Some("exFAT".into()),
             None,
@@ -4541,13 +4546,30 @@ mod tests {
         );
         let snapshot = snapshot_from_volumes(1, vec![volume]);
         let request = SourceInventoryRequest {
-            source_root: "f:\\".into(),
+            source_root: if cfg!(windows) {
+                "f:\\".into()
+            } else {
+                mount.into()
+            },
             source_medium_key: snapshot.devices[0].identity.media_key.clone(),
         };
         assert!(source_inventory_matches_current_device(&snapshot, &request));
 
+        #[cfg(not(windows))]
+        assert!(!source_inventory_matches_current_device(
+            &snapshot,
+            &SourceInventoryRequest {
+                source_root: "/Volumes/card".into(),
+                ..request.clone()
+            },
+        ));
+
         let stale_mount = SourceInventoryRequest {
-            source_root: "G:\\".into(),
+            source_root: if cfg!(windows) {
+                "G:\\".into()
+            } else {
+                "/Volumes/OTHER".into()
+            },
             ..request.clone()
         };
         assert!(!source_inventory_matches_current_device(

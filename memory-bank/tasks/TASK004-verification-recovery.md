@@ -221,6 +221,15 @@ Retry only classified transient failures (temporary sharing violation, disconnec
 
 ## Evidence and test plan
 
+- 2026-10-13 Mac compatibility work replaces media/receipt publication with
+  `renamex_np(RENAME_EXCL)` and adds competing-file, occupied receipt and dangling
+  symlink regressions. Collisions preserve the verified partial and existing
+  destination; unsupported exclusive rename remains an error. Windows metadata
+  inventory/nested-destination checks pass, and Mac APFS/APFSX/exFAT native checks
+  are queued. SQLite on macOS enables/verifies fullfsync and reads back WAL/FULL
+  on file-backed reopen. Directory-entry durability and physical power-loss
+  guarantees remain unverified; macOS formatting remains unavailable.
+
 - Known-answer BLAKE3 vectors plus generated files at 0 B, 1 B, chunk boundary ±1 B, buffer boundary ±1 B, sparse-looking content, multi-GiB logical size where feasible, and many-small-file sets.
 - Mutation matrix for source during read and destination after write: single-bit, truncation, extension, swap, wrong-target, same-size corruption, stale pre-existing file, and timestamp-preserving corruption.
 - Deterministic crash/fault injection after each state transaction, chunk write, chunk checkpoint, temp sync, destination hash, rename, directory sync, receipt seal, and authorization issue/consume.
