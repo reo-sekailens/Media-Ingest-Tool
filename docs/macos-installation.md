@@ -72,8 +72,12 @@ Reader/card immutable identity depends on what macOS and the reader expose;
 the UI reports confidence rather than assuming a USB reader serial identifies
 the card. Unknown or changing mounts remain subject to native safety checks.
 
-Use a writable local destination and preserve the source card until the full
-copy/readback succeeds and a receipt is available. APFS and exFAT tests on
+Use a writable local **APFS or case-sensitive APFS destination** and preserve
+the source card until the full copy/readback succeeds and a receipt is available.
+ExFAT cards can be sources. ExFAT destinations do not provide the atomic
+no-overwrite rename required by this app on the tested Mac systems; the app
+returns an unsupported-publication error and preserves the source and verified
+partial instead of completing the ingest. APFS and exFAT tests on
 disposable runner disk images do not certify physical media, power-loss safety,
 NAS/SMB servers, all readers, or all camera file formats.
 

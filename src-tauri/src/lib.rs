@@ -3724,6 +3724,10 @@ fn error_response(error: IngestError) -> IpcResponse<VerifiedIngestResult> {
             IpcErrorCode::InvalidRequest,
             "A destination file or receipt already exists; existing media was not overwritten",
         ),
+        IngestError::AtomicPublicationUnsupported => IpcResponse::failure(
+            IpcErrorCode::DeviceUnavailable,
+            "This destination cannot safely publish verified files without overwriting existing data. Choose a local APFS destination on macOS. Your source files were preserved",
+        ),
         IngestError::InsufficientDestinationSpace => IpcResponse::failure(
             IpcErrorCode::DeviceUnavailable,
             "The destination does not have enough currently available space for this ingest plan",
@@ -5154,6 +5158,251 @@ mod tests {
         .expect("receipt");
         assert!(receipt.contains("session_only") || receipt.contains("unresolved"));
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires disposable exFAT and APFS image roots supplied by the macOS filesystem script"]
+    fn mac_exfat_source_completes_on_apfs_destination() {
+        use std::os::unix::fs::MetadataExt;
+
+        let image_root = |variable: &str, expected_filesystem: &str| {
+            let root = PathBuf::from(std::env::var_os(variable).expect(variable))
+                .canonicalize()
+                .expect("existing disposable image root");
+            assert!(root.is_dir(), "image root must be an existing directory");
+            let output = std::process::Command::new("/usr/sbin/diskutil")
+                .args(["info", "-plist"])
+                .arg(&root)
+                .output()
+                .expect("read-only filesystem inspection");
+            assert!(
+                output.status.success(),
+                "diskutil filesystem inspection failed"
+            );
+            let properties = plist::Value::from_reader(std::io::Cursor::new(output.stdout))
+                .expect("diskutil property list");
+            let filesystem = properties
+                .as_dictionary()
+                .and_then(|dictionary| dictionary.get("FilesystemType"))
+                .and_then(plist::Value::as_string);
+            assert_eq!(filesystem, Some(expected_filesystem));
+            root
+        };
+        let exfat_root = image_root("MEDIA_INGEST_TEST_EXFAT_ROOT", "exfat");
+        let apfs_root = image_root("MEDIA_INGEST_TEST_APFS_ROOT", "apfs");
+        assert_ne!(
+            std::fs::metadata(&exfat_root)
+                .expect("exFAT metadata")
+                .dev(),
+            std::fs::metadata(&apfs_root).expect("APFS metadata").dev(),
+            "source and destination must use distinct mounted filesystems"
+        );
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let owned_name = format!("mit-cross-filesystem-{operation_id}");
+        let source = exfat_root.join(&owned_name);
+        let destination_workspace = apfs_root.join(&owned_name);
+        std::fs::create_dir(&source).expect("exclusive owned source directory");
+        std::fs::create_dir(&destination_workspace).expect("exclusive owned destination directory");
+        std::fs::create_dir(source.join("DCIM")).expect("owned source fixture directory");
+        let destination = destination_workspace.join("destination");
+        let database = destination_workspace.join("store.sqlite3");
+        let fixtures = [
+            ("DCIM/clip.mov", vec![0x5a; 2_097_169]),
+            (
+                "DCIM/still.tif",
+                crate::ingest::tests::exif_hour_range_tiff("2026:10:13 13:42:00", 127),
+            ),
+        ];
+        let mut original_metadata = Vec::new();
+        for (relative, bytes) in &fixtures {
+            let path = source.join(relative);
+            std::fs::write(&path, bytes).expect("owned source fixture");
+            original_metadata.push(std::fs::metadata(path).expect("original source metadata"));
+        }
+        let expected_bytes = fixtures.iter().map(|(_, bytes)| bytes.len() as u64).sum();
+        let prepared = prepare_verified_ingest(
+            VerifiedIngestRequest {
+                operation_id: Some(operation_id.clone()),
+                source_root: source.to_string_lossy().into(),
+                destination_root: destination.to_string_lossy().into(),
+                source_medium_key: format!("session:cross-filesystem-{operation_id}"),
+                source_identity_confidence: IdentityConfidence::SessionOnly,
+                source_generation: 1,
+                max_workers: 2,
+                sort_mode: IngestSortMode::OriginalTree,
+                capture_time_basis: CaptureTimeBasis::default(),
+                interval_minutes: None,
+                custom_directory_fields: Vec::new(),
+                destination_depth_order: None,
+                auto_ingest_triggered: false,
+            },
+            operation_id.clone(),
+        )
+        .expect("production exFAT source plan");
+        assert_eq!(prepared.files.len(), fixtures.len());
+        assert!(
+            !destination.exists(),
+            "planning must not create a destination"
+        );
+        let source_identity = source_identity_for_request(&prepared.request);
+        let mut store = LocalStore::open(&database).expect("APFS local manifest");
+        store
+            .begin_ingest_run(
+                &operation_id,
+                &source_identity,
+                1,
+                &source.to_string_lossy(),
+                &destination.to_string_lossy(),
+            )
+            .expect("persist native run");
+        for file in &prepared.files {
+            assert!(store
+                .record_planned_file(
+                    &operation_id,
+                    &PlannedFileRecord {
+                        entry_id: file.entry_id.clone(),
+                        source_relative_path: file.source.relative_path.to_string_lossy().into(),
+                        destination_relative_path: file
+                            .destination_relative_path
+                            .to_string_lossy()
+                            .into(),
+                        byte_length: file.source.byte_length,
+                    },
+                )
+                .expect("persist frozen plan"));
+        }
+        assert!(store
+            .transition_ingest_run(&operation_id, IngestRunState::Copying, "plan persisted")
+            .expect("copying state"));
+        let completed = execute_prepared_ingest(
+            prepared,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
+        )
+        .expect("production exFAT-to-APFS verified ingest");
+        assert_eq!(completed.summary.copied_files, fixtures.len());
+        assert_eq!(completed.summary.copied_bytes, expected_bytes);
+        assert_eq!(
+            completed.summary.source_marker_status,
+            SourceMarkerStatus::Unavailable
+        );
+        assert!(crate::storage_marker::read_marker(&source)
+            .expect("marker before completion")
+            .is_none());
+        assert!(persist_verified_completion(
+            &mut store,
+            &operation_id,
+            &completed
+        ));
+        assert!(store
+            .has_completed_receipt_for_source(&operation_id, &source_identity.identity_key, 1)
+            .expect("exact completed receipt"));
+        assert_eq!(
+            store
+                .verified_file_count(&operation_id)
+                .expect("committed count"),
+            fixtures.len() as u64
+        );
+        assert_eq!(
+            store
+                .receipt_manifest_root(&operation_id)
+                .expect("sealed root"),
+            Some(completed.manifest_root_blake3.clone())
+        );
+        drop(store);
+
+        // The production command writes the optional marker only after SQLite
+        // completion. Exercise both creation and atomic record upgrade on exFAT.
+        assert_eq!(source_marker_status(&source), SourceMarkerStatus::Created);
+        assert_eq!(
+            source_marker_status_with_content_witness(&source, &completed.manifest_root_blake3),
+            SourceMarkerStatus::Recognized
+        );
+        let marker = crate::storage_marker::read_record(&source)
+            .expect("read exFAT marker")
+            .expect("created exFAT marker");
+        assert_eq!(
+            marker.content_fingerprint.as_deref(),
+            Some(completed.manifest_root_blake3.as_str())
+        );
+        let receipt: IngestReceipt = serde_json::from_slice(
+            &std::fs::read(
+                destination
+                    .join(".media-ingest-receipts")
+                    .join(&completed.summary.receipt_name),
+            )
+            .expect("published APFS receipt"),
+        )
+        .expect("versioned receipt");
+        assert_eq!(receipt.source_medium_key, source_identity.identity_key);
+        assert_eq!(receipt.source_generation, 1);
+        assert_eq!(
+            receipt.manifest_root_blake3,
+            manifest_root(&completed.copies)
+        );
+        assert_eq!(receipt.files.len(), fixtures.len());
+        for ((relative, bytes), before) in fixtures.iter().zip(&original_metadata) {
+            let source_path = source.join(relative);
+            let copy = completed
+                .copies
+                .iter()
+                .find(|copy| copy.source_relative_path == Path::new(relative))
+                .expect("exact frozen source entry");
+            let source_readback = std::fs::read(&source_path).expect("fresh exFAT source read");
+            let final_readback = std::fs::read(&copy.final_path).expect("fresh APFS final read");
+            assert_eq!(&source_readback, bytes);
+            assert_eq!(&final_readback, bytes);
+            let independent_digest = blake3::hash(&source_readback).to_hex().to_string();
+            assert_eq!(
+                independent_digest,
+                blake3::hash(&final_readback).to_hex().to_string()
+            );
+            assert_eq!(copy.digest_hex, independent_digest);
+            let receipt_file = receipt
+                .files
+                .iter()
+                .find(|file| file.relative_path == *relative)
+                .expect("receipt has the independently verified file");
+            assert_eq!(receipt_file.blake3, independent_digest);
+            assert_eq!(receipt_file.bytes, bytes.len() as u64);
+            let after = std::fs::metadata(source_path).expect("source preserved metadata");
+            assert_eq!(after.len(), before.len());
+            assert_eq!(
+                after.modified().expect("source mtime"),
+                before.modified().expect("original mtime")
+            );
+        }
+        assert_eq!(
+            enumerate_regular_files(&source)
+                .expect("source media preserved")
+                .len(),
+            fixtures.len()
+        );
+        let reopened = LocalStore::open(&database).expect("reopen durable manifest");
+        let history = reopened.recent_ingest_runs(1).expect("persisted history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].run_id, operation_id);
+        assert_eq!(history[0].state, "completed");
+        assert!(history[0].receipt_available);
+        assert_eq!(history[0].verified_file_count, fixtures.len() as u64);
+        assert_eq!(history[0].verified_bytes, expected_bytes);
+        drop(reopened);
+
+        // Remove only the freshly created UUID subdirectories, never supplied
+        // image roots or sibling content. Validate ownership before recursion.
+        assert_eq!(
+            source.canonicalize().expect("owned source path"),
+            exfat_root.join(&owned_name)
+        );
+        assert_eq!(
+            destination_workspace
+                .canonicalize()
+                .expect("owned destination path"),
+            apfs_root.join(&owned_name)
+        );
+        std::fs::remove_dir_all(&source).expect("cleanup owned exFAT fixture");
+        std::fs::remove_dir_all(&destination_workspace).expect("cleanup owned APFS fixture");
     }
 
     #[test]

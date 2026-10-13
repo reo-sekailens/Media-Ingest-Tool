@@ -258,6 +258,7 @@ pub enum IngestError {
     Cancelled,
     InvalidPath,
     DestinationExists,
+    AtomicPublicationUnsupported,
     SourceChanged,
     UnsafeSourceEntry,
     VerificationFailed,
@@ -676,6 +677,10 @@ fn publish_verified_file(temporary: &Path, destination: &Path) -> Result<(), Ing
     let error = io::Error::last_os_error();
     if error.kind() == io::ErrorKind::AlreadyExists {
         Err(IngestError::DestinationExists)
+    } else if error.raw_os_error() == Some(45) {
+        // Darwin ENOTSUP: observed on exFAT for RENAME_EXCL. Do not
+        // reinterpret unrelated I/O errors or fall back to overwriting.
+        Err(IngestError::AtomicPublicationUnsupported)
     } else {
         Err(IngestError::Io(error))
     }
@@ -1657,6 +1662,75 @@ pub(crate) mod tests {
             b"native filesystem probe"
         );
         fs::remove_dir_all(root).expect("probe cleanup");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the disposable exFAT image created by test-macos-filesystems.sh"]
+    fn mac_exfat_destination_preserves_data_when_publication_is_unsupported() {
+        let volume = std::env::var_os("MEDIA_INGEST_TEST_EXFAT_ROOT")
+            .map(PathBuf::from)
+            .expect("explicit disposable exFAT root");
+        assert!(volume.is_absolute() && volume.is_dir());
+        let root = volume.join(format!("ingest-exfat-{}", Uuid::new_v4()));
+        let source_root = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_root).expect("source");
+        fs::write(source_root.join("clip.mov"), b"camera bytes").expect("source bytes");
+        let source = enumerate_regular_files(&source_root)
+            .expect("plan")
+            .remove(0);
+        assert!(matches!(
+            verified_copy_to(
+                &source_root,
+                &source,
+                Path::new("clip.mov"),
+                "exfat-entry",
+                &destination,
+                &AtomicBool::new(false)
+            ),
+            Err(IngestError::AtomicPublicationUnsupported)
+        ));
+        assert_eq!(
+            fs::read(source_root.join("clip.mov")).expect("source retained"),
+            b"camera bytes"
+        );
+        assert_eq!(
+            fs::read(partial_path(&destination, "exfat-entry")).expect("verified partial retained"),
+            b"camera bytes"
+        );
+        assert!(!destination.join("clip.mov").exists());
+        let receipt = IngestReceipt {
+            schema_version: 1,
+            manifest_algorithm: MANIFEST_ALGORITHM.into(),
+            manifest_root_blake3: manifest_root(&[]),
+            source_medium_key: "test-only".into(),
+            source_identity_confidence: "unresolved".into(),
+            source_generation: 1,
+            files: vec![],
+        };
+        assert!(matches!(
+            write_receipt(&destination.join("receipt.json"), &receipt),
+            Err(IngestError::AtomicPublicationUnsupported)
+        ));
+        assert!(!destination.join("receipt.json").exists());
+        fs::write(destination.join("clip.mov"), b"other operator bytes").expect("competitor");
+        assert!(matches!(
+            verified_copy_to(
+                &source_root,
+                &source,
+                Path::new("clip.mov"),
+                "exfat-entry",
+                &destination,
+                &AtomicBool::new(false)
+            ),
+            Err(IngestError::DestinationExists)
+        ));
+        assert_eq!(
+            fs::read(destination.join("clip.mov")).expect("competitor retained"),
+            b"other operator bytes"
+        );
+        fs::remove_dir_all(root).expect("owned fixture cleanup");
     }
 
     #[test]

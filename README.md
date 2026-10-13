@@ -91,6 +91,10 @@ checked shipping DMG startup. These checks require successful hosted results;
 physical reader/card, privacy-consent, sleep/wake, and macOS 13.3 runtime
 acceptance remain separate. **macOS Quick Format is unavailable.**
 
+Use APFS or case-sensitive APFS destinations on Mac. ExFAT cards are valid
+sources, but ExFAT destinations lack the atomic no-overwrite publication
+required by the app on tested Mac systems and are rejected safely.
+
 ## Evidence-oriented project workflow
 
 The repository includes an evidence-oriented memory bank and project entry points:

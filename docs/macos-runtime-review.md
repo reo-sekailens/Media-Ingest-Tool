@@ -18,6 +18,15 @@ exact-source hosted run. MAC-R05 directory-entry durability and MAC-R08 physical
 sleep/wake remain open. The finding table below describes the initial baseline,
 not the current fixed source. See [current validation](macos-compatibility.md).
 
+The native follow-up on commit `efa8cfa5f4e09c2e51bac873756f56c31be55519`
+isolated the ExFAT failure: `File::sync_all` succeeded, while the exclusive
+rename returned Darwin ENOTSUP (45). Both primitives succeeded on APFS and
+case-sensitive APFS. The integration maps that exact publication failure to
+an actionable unsupported-destination response. It retains the mandatory
+full flush and atomic refusal to replace existing files. ExFAT is supported
+as a source; Mac destinations use APFS/APFSX. ExFAT-destination certification
+remains blocked. This finding does not establish physical drive-cache safety.
+
 ## Audited implementation
 
 The review read `memory-bank/projectbrief.md`, `activeContext.md`, the task
@@ -208,10 +217,11 @@ cannot accidentally satisfy capture-folder expectations.
 
 ## Verification boundary
 
-This document is a static/source and primary-documentation review. No macOS
-host, mounted APFS/exFAT device, native Open panel, Gatekeeper consent flow,
-sleep/wake workflow or packaged WKWebView was exercised by this review. It
-does not certify Apple Silicon model variants, physical card identity,
+The initial findings are a static/source and primary-documentation review.
+The separate native follow-up exercised disposable APFS/APFSX/ExFAT images,
+shipping DMG startup and instrumented WKWebView on hosted Intel/ARM Macs.
+Native Open panels, Gatekeeper consent, physical devices and sleep/wake were
+not exercised. This does not certify Apple Silicon model variants, physical card identity,
 reader topology, destructive formatting, performance or power-loss recovery.
 
 Documentation checks can reject contradicted compatibility claims and direct

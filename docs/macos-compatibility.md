@@ -33,6 +33,8 @@ versions, every M-series chip model, peripherals, storage servers, or camera for
 - Native discovery requires matching fresh device/mount identifiers and explicit
   internal/external evidence. Mounted read-only cards can be admitted based on
   readable roots; inability to write a marker does not imply inability to ingest.
+  Disk images are excluded by their native bus protocol even when macOS omits
+  the virtual/physical field.
 - Safe eject uses the native utility's supported argument shape and OS-neutral
   errors. macOS format remains fail-closed pending a privileged native helper.
 - Raised the minimum from 13.0 to 13.3 to match Tailwind 4's Safari 16.4 baseline.
@@ -41,6 +43,9 @@ versions, every M-series chip model, peripherals, storage servers, or camera for
 - Media and receipt publication use macOS `renamex_np(RENAME_EXCL)` to refuse an
   occupied destination atomically. Collisions preserve the verified partial;
   unsupported filesystem operations fail instead of falling back to overwrite.
+  Native ExFAT images support full file flush but reject this exclusive rename.
+  ExFAT sources can be copied to APFS destinations; unsupported destinations
+  receive an actionable APFS-destination error and retain source/partial data.
 - Inventory skips only exact root `.fseventsd`, `.Spotlight-V100`, `.Trashes`,
   Windows service metadata and the app marker. Ordinary dotfiles/nested names
   remain media, and inventory/planning/content witnesses share the enumeration.
@@ -77,7 +82,9 @@ an embedded test driver; shipping DMG startup is checked independently.
   minimum but cannot prove every symbol or OS behavior on 13.3.
 - `renamex_np` support, full-sync behavior and directory-entry durability depend
   on the actual destination filesystem/device. Unsupported operations stay errors.
-  Network storage and power loss are not certified.
+  ExFAT destinations are blocked by their missing exclusive-rename capability;
+  use APFS or case-sensitive APFS on macOS. Network storage and power loss are
+  not certified.
 - Full native IOMedia topology/card hardware identity, stronger inode/handle
   binding against external mutation,
   power notifications and privileged macOS formatting remain separately scoped

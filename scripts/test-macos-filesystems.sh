@@ -9,13 +9,20 @@ fi
 task_root="$(mktemp -d "${TMPDIR:-/tmp}/mit-filesystems.XXXXXX")"
 task_root="$(cd "$task_root" && pwd -P)"
 task_mount="$task_root/mounted"
-mkdir "$task_mount"
+task_apfs="$task_root/apfs-destination"
+mkdir "$task_mount" "$task_apfs"
 cleanup() {
   if /sbin/mount | /usr/bin/grep -Fq " on $task_mount ("; then
     /usr/bin/hdiutil detach "$task_mount"
   fi
+  if /sbin/mount | /usr/bin/grep -Fq " on $task_apfs ("; then
+    /usr/bin/hdiutil detach "$task_apfs"
+  fi
 }
 trap cleanup EXIT
+/usr/bin/hdiutil create -size 512m -type SPARSE -fs APFS \
+  -volname MIT-Destination "$task_root/destination.sparseimage"
+/usr/bin/hdiutil attach -nobrowse -mountpoint "$task_apfs" "$task_root/destination.sparseimage"
 for filesystem in APFS APFSX ExFAT; do
   image="$task_root/$filesystem.sparseimage"
   if [[ "$filesystem" == APFSX ]]; then
@@ -40,7 +47,22 @@ for filesystem in APFS APFSX ExFAT; do
     echo "$filesystem image unexpectedly has case-sensitive names" >&2
     exit 1
   fi
-  echo "Validating verified ingest on disposable $filesystem volume"
+  if [[ "$filesystem" == ExFAT ]]; then
+    echo "Validating exFAT source to APFS destination and safe exFAT destination rejection"
+    MEDIA_INGEST_TEST_EXFAT_ROOT="$task_mount" MEDIA_INGEST_TEST_APFS_ROOT="$task_apfs" \
+      cargo test --locked --manifest-path src-tauri/Cargo.toml \
+      'tests::mac_exfat_source_completes_on_apfs_destination' -- --ignored --exact --test-threads=1 --nocapture
+    MEDIA_INGEST_TEST_EXFAT_ROOT="$task_mount" \
+      cargo test --locked --manifest-path src-tauri/Cargo.toml \
+      'ingest::tests::mac_exfat_destination_preserves_data_when_publication_is_unsupported' \
+      -- --ignored --exact --test-threads=1 --nocapture
+    TMPDIR="$task_mount/fixtures" cargo test --locked --manifest-path src-tauri/Cargo.toml \
+      'ingest::tests::inventory_excludes_mac_volume_metadata_but_keeps_nested_names_and_dotfiles' \
+      -- --exact --test-threads=1
+    /usr/bin/hdiutil detach "$task_mount"
+    continue
+  fi
+  echo "Validating verified ingest on disposable $filesystem destination"
   # These execute the production byte-copy/readback/publication/receipt path.
   # Symlink-dependent tests belong to APFS; exFAT does not support symlinks.
   for test in \
@@ -58,4 +80,5 @@ for filesystem in APFS APFSX ExFAT; do
   done
   /usr/bin/hdiutil detach "$task_mount"
 done
-echo "APFS, case-sensitive APFS, and exFAT real-file validation passed"
+/usr/bin/hdiutil detach "$task_apfs"
+echo "APFS/APFSX ingest, exFAT source ingest, and exFAT destination safety checks passed"
