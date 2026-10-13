@@ -98,6 +98,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          cache-on-failure: true
           key: quality-${{ matrix.os }}
       - name: Install Linux Tauri prerequisites
         if: runner.os == 'Linux'
@@ -118,6 +119,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/macos-native-evidence"
           /usr/bin/sw_vers > "$RUNNER_TEMP/macos-native-evidence/os-version.txt"
           MANPAGER=cat /usr/bin/man diskutil | /usr/bin/col -b > "$RUNNER_TEMP/macos-native-evidence/diskutil-reference.txt"
+          MANPAGER=cat /usr/bin/man hdiutil | /usr/bin/col -b > "$RUNNER_TEMP/macos-native-evidence/hdiutil-reference.txt"
+          MANPAGER=cat /usr/bin/man newfs_apfs | /usr/bin/col -b > "$RUNNER_TEMP/macos-native-evidence/newfs-apfs-reference.txt"
+      - name: Diagnose native source admission without private fields
+        if: always() && runner.os == 'macOS'
+        working-directory: .
+        run: node scripts/macos-discovery-diagnostics.mjs "$RUNNER_TEMP/macos-native-evidence/discovery-admission.json"
       - name: Preserve native CLI and filesystem evidence
         if: always() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
@@ -164,6 +171,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          cache-on-failure: true
           key: macos-ui-${{ matrix.os }}
       - run: npm ci
       - name: Build isolated test-only app
@@ -175,6 +183,9 @@ jobs:
           --app 'src-tauri/target/${{ matrix.target }}/debug/bundle/macos/Media Ingest Tool.app'
           --output '${{ runner.temp }}/macos-ui-evidence'
           --expected-arch ${{ matrix.architecture }}
+      - name: Diagnose observed runner volumes
+        if: always()
+        run: node scripts/macos-discovery-diagnostics.mjs "$RUNNER_TEMP/macos-ui-evidence/discovery-admission.json"
       - name: Preserve native UI screenshots and evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -219,6 +230,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          cache-on-failure: true
           key: macos-smoke-package-${{ matrix.os }}
       - run: npm ci
       - run: npm run tauri build -- --ci --bundles app,dmg --target ${{ matrix.target }} -- --locked

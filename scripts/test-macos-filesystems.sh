@@ -18,10 +18,28 @@ cleanup() {
 trap cleanup EXIT
 for filesystem in APFS APFSX ExFAT; do
   image="$task_root/$filesystem.sparseimage"
-  /usr/bin/hdiutil create -size 512m -type SPARSE -fs "$filesystem" \
-    -volname "MIT-$filesystem" "$image"
+  if [[ "$filesystem" == APFSX ]]; then
+    # hdiutil expects APFS; newfs_apfs -e selects case-sensitive names.
+    # APFSX is a diskutil personality, not hdiutil's filesystem name.
+    /usr/bin/hdiutil create -size 512m -type SPARSE -fs APFS -fsargs '-e' \
+      -volname "MIT-$filesystem" "$image"
+  else
+    /usr/bin/hdiutil create -size 512m -type SPARSE -fs "$filesystem" \
+      -volname "MIT-$filesystem" "$image"
+  fi
   /usr/bin/hdiutil attach -nobrowse -mountpoint "$task_mount" "$image"
   mkdir "$task_mount/fixtures"
+  # Verify the actual case policy instead of trusting the requested format name.
+  printf 'case probe\n' > "$task_mount/fixtures/CaseProbe"
+  if [[ "$filesystem" == APFSX ]]; then
+    if [[ -e "$task_mount/fixtures/caseprobe" ]]; then
+      echo 'Case-sensitive APFS image does not preserve distinct case' >&2
+      exit 1
+    fi
+  elif [[ ! -e "$task_mount/fixtures/caseprobe" ]]; then
+    echo "$filesystem image unexpectedly has case-sensitive names" >&2
+    exit 1
+  fi
   echo "Validating verified ingest on disposable $filesystem volume"
   # These execute the production byte-copy/readback/publication/receipt path.
   # Symlink-dependent tests belong to APFS; exFAT does not support symlinks.

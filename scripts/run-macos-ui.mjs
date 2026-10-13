@@ -96,10 +96,13 @@ async function main() {
   }
   const expectedArch = options["--expected-arch"];
   const nodeArch = process.arch === "x64" ? "x86_64" : process.arch;
+  // Intel hosts may omit hw.optional.arm64 rather than report zero. uname and
+  // the translated-process check still reject a mismatched/Rosetta launch.
+  const reportedArch = nativeText("/usr/bin/uname", ["-m"]);
   const hardwareArch =
-    nativeText("/usr/sbin/sysctl", ["-n", "hw.optional.arm64"]) === "1"
+    nativeText("/usr/sbin/sysctl", ["-in", "hw.optional.arm64"], true) === "1"
       ? "arm64"
-      : "x86_64";
+      : reportedArch;
   if (
     nodeArch !== expectedArch ||
     hardwareArch !== expectedArch ||
@@ -171,7 +174,7 @@ async function main() {
     binarySha256: hash.digest("hex"),
     appleDeveloperCredentialsRequired: false,
     mockedCommands: false,
-    expectedEmptyInventory: true,
+    inventoryPolicy: "observed-native-read-only",
     status: "failed",
   };
   const port = await unusedLoopbackPort();
@@ -183,7 +186,7 @@ async function main() {
       TAURI_WEBDRIVER_PORT: String(port),
     },
     // Native logs can contain private paths/device details. This smoke publishes
-    // only bounded assertions, counts and the empty-state screenshot.
+    // only bounded assertions, counts and sanitized native screenshots.
     stdio: "ignore",
     shell: false,
   });
@@ -199,7 +202,6 @@ async function main() {
           ...process.env,
           TAURI_WEBDRIVER_PORT: String(port),
           MEDIA_INGEST_MACOS_UI_OUTPUT: outputDirectory,
-          MEDIA_INGEST_MACOS_UI_EXPECT_EMPTY: "1",
         },
         stdio: "inherit",
         shell: false,

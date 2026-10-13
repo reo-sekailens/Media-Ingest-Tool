@@ -7,7 +7,6 @@ import { describe, it, before, after } from "node:test";
 import { NativeWebDriver } from "./webdriver.mjs";
 
 const outputDirectory = process.env.MEDIA_INGEST_MACOS_UI_OUTPUT;
-const expectEmpty = process.env.MEDIA_INGEST_MACOS_UI_EXPECT_EMPTY !== "0";
 const browser = new NativeWebDriver(Number(process.env.TAURI_WEBDRIVER_PORT));
 const evidence = {
   evidenceKind: "native-wkwebview-test-build",
@@ -92,14 +91,17 @@ describe("macOS native startup and read-only workspace", () => {
     assert.ok(Array.isArray(snapshot.devices), "Native inventory must be an array");
     assert.ok(Number.isInteger(snapshot.sequence), "Native snapshot must be sequenced");
     assert.ok(snapshot.sequence > 0, "The inventory must come from native discovery");
-    if (expectEmpty) {
-      assert.equal(
-        snapshot.devices.length,
-        0,
-        "CI smoke requires an empty native inventory; device workflows are separate",
-      );
-    }
     evidence.inventoryCount = snapshot.devices.length;
+    evidence.inventorySummary = snapshot.devices.map((device) => ({
+      state: device.state,
+      filesystem: device.details.filesystem,
+      confidence: device.identity.confidence,
+      mountCount: device.details.mountLocations.length,
+    }));
+    // Publish only classifications/counts; never host paths, names or identifiers.
+    process.stdout.write(
+      `Native inventory summary: ${JSON.stringify(evidence.inventorySummary)}\n`,
+    );
     await browser.waitUntil(renderedInventoryMatchesNative, {
       timeoutMsg: "The UI did not replace preview fixtures with native inventory",
     });
@@ -147,18 +149,24 @@ describe("macOS native startup and read-only workspace", () => {
     evidence.tests.nativeHistory = "passed";
   });
 
-  it("shows the observed empty state and permits read-only refresh", async (context) => {
+  it("refreshes the observed inventory without a source operation", async () => {
+    const selector =
+      snapshot.devices.length > 0 ? ".source-rail > button" : "main button";
+    await focusButton(selector);
+    await browser.click(selector);
+    snapshot = await invokeReadOnly("get_device_snapshot");
+    await browser.waitUntil(renderedInventoryMatchesNative);
+    evidence.tests.nativeInventoryRefresh = "passed";
+  });
+
+  it("shows the empty state only when native inventory is empty", async (context) => {
     if (snapshot.devices.length > 0) {
-      evidence.tests.emptyStateRefresh = "skipped: native media observed";
+      evidence.tests.emptyState = "skipped: native inventory is nonempty";
       context.skip("Native media observed");
       return;
     }
-    await focusButton("main button");
-    await browser.click("main button");
-    snapshot = await invokeReadOnly("get_device_snapshot");
-    assert.equal(snapshot.devices.length, 0, "Refresh must retain empty native state");
     await browser.waitUntil(renderedInventoryMatchesNative);
-    evidence.tests.emptyStateRefresh = "passed";
+    evidence.tests.emptyState = "passed";
   });
 
   it("checks theme and identity panels only when native media exists", async (context) => {
@@ -207,20 +215,74 @@ describe("macOS native startup and read-only workspace", () => {
     evidence.tests.mediaPanels = "passed: focusability and driver click only";
   });
 
-  it("saves an actual native empty-state screenshot", async (context) => {
-    if (snapshot.devices.length > 0) {
-      evidence.tests.nativeScreenshot = "skipped: avoid retaining device details";
-      context.skip("Avoid retaining device details");
-      return;
-    }
-    await browser.execute(() => {
+  it("saves a native screenshot with sensitive text hidden in place", async () => {
+    const privateValues = snapshot.devices
+      .flatMap((device) => [
+        device.details.displayName,
+        ...device.details.mountLocations,
+        device.details.readerFingerprint,
+        device.details.readerSlot,
+        device.identity.mediaKey,
+        ...device.identity.evidence.map((entry) => entry.fingerprint),
+      ])
+      .filter((value) => typeof value === "string" && value.length > 0);
+    const redactionCount = await browser.execute((values) => {
       if (document.activeElement instanceof window.HTMLElement) {
         document.activeElement.blur();
       }
-    });
-    const png = await browser.saveScreenshot(
-      path.join(outputDirectory, "native-empty-state.png"),
-    );
+      const targets = new Set(
+        document.querySelectorAll(
+          '#device-title, [aria-label="Connected media"] li strong, .workspace-content dd, [aria-label="Saved configuration"] p, [aria-label="Saved configuration"] span, [aria-label="Saved configuration"] strong, .workspace-content input, .workspace-content textarea',
+        ),
+      );
+      const walker = document.createTreeWalker(
+        document.body,
+        window.NodeFilter.SHOW_TEXT,
+      );
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (
+          values.some((value) => node.textContent.includes(value)) &&
+          node.parentElement
+        ) {
+          targets.add(node.parentElement);
+        }
+      }
+      for (const element of targets)
+        element.setAttribute("data-native-smoke-redacted", "");
+      const style = document.createElement("style");
+      style.id = "native-smoke-redaction-style";
+      // Visibility preserves actual sizes and positions while completely
+      // excluding sensitive text from pixels. It is removed after capture.
+      style.textContent =
+        "[data-native-smoke-redacted] { visibility: hidden !important; }";
+      document.head.append(style);
+      return targets.size;
+    }, privateValues);
+    evidence.screenshotRedactions = {
+      applied: redactionCount > 0,
+      elementCount: redactionCount,
+      scope:
+        "device names, mount paths, opaque identities, reader references, destination/configuration values",
+      layoutPreserved: true,
+    };
+    const filename =
+      snapshot.devices.length > 0
+        ? "native-workspace-redacted.png"
+        : "native-empty-state.png";
+    let png;
+    try {
+      png = await browser.saveScreenshot(path.join(outputDirectory, filename));
+    } finally {
+      await browser.execute(() => {
+        for (const element of document.querySelectorAll(
+          "[data-native-smoke-redacted]",
+        )) {
+          element.removeAttribute("data-native-smoke-redacted");
+        }
+        document.querySelector("#native-smoke-redaction-style")?.remove();
+      });
+    }
     assert.equal(png.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
     assert.ok(png.readUInt32BE(16) >= 960, "Native screenshot must have desktop width");
     assert.ok(
@@ -228,6 +290,7 @@ describe("macOS native startup and read-only workspace", () => {
       "Native screenshot must have desktop height",
     );
     evidence.tests.nativeScreenshot = "passed";
+    evidence.screenshotFilename = filename;
   });
 
   after(async () => {

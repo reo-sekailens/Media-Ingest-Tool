@@ -2,7 +2,7 @@
 
 The native smoke harness starts a dedicated `.app` on an actual Intel or Apple
 Silicon macOS runner. It tests the bundled React frontend inside WKWebView, calls
-the real Tauri startup commands, and saves a native empty-state screenshot.
+the real Tauri startup commands, and saves a sanitized native screenshot.
 It requires no Apple Developer account, paid driver service, or Node dependency.
 
 ## Isolation and release boundary
@@ -62,8 +62,9 @@ The output directory must be new, have an existing parent, and be outside the
 repository. The harness verifies the dedicated bundle identifier and exact
 single-architecture executable before launch, rejects Rosetta-translated runs,
 selects a fresh loopback port, and stops its own app after the suite. It refuses
-non-macOS execution, a shipping bundle, or a runner with removable media. No
-source, media, profile, or destination is created by the tests; normal app startup
+non-macOS execution or a shipping bundle. It tests the actual observed inventory
+without assuming the runner has no external volumes. No source, media, profile,
+or destination is created by the tests; normal app startup
 does initialize the separate test app's empty local database and support log.
 
 The transport adapter has independent, portable contract checks:
@@ -77,24 +78,27 @@ sanitized error handling, and bounded waits. They are not native runtime evidenc
 
 ## Assertions and artifacts
 
-| Check                | Evidence                                                                                                                          |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Native app startup   | Actual `.app` executable, native CPU match, WKWebView user agent and bridge, dedicated app identifier, bundled `tauri:` origin    |
-| Frontend/CSP startup | Rendered `main`, loaded stylesheet, computed background, declared minimum width, no horizontal overflow                           |
-| Device inventory     | Real `get_device_snapshot` result with contract version and positive native sequence; rendered inventory agrees after startup     |
-| Fixture separation   | Preview A-Cam/B-Cam cards disappear after native initialization                                                                   |
-| Local history        | Real `get_ingest_history` succeeds against the isolated empty store                                                               |
-| Empty UI             | Visible refresh action is an enabled focusable HTML button, driver click succeeds, and the native empty state remains consistent  |
-| Screenshot           | `native-empty-state.png` comes from the embedded driver's native WKWebView snapshot and has a valid desktop-size PNG header       |
-| Result/provenance    | `smoke-summary.json` contains counts, passed/skipped checks and limits; `run.json` records the test build and overall exit result |
+| Check                | Evidence                                                                                                                                                                                           |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Native app startup   | Actual `.app` executable, native CPU match, WKWebView user agent and bridge, dedicated app identifier, bundled `tauri:` origin                                                                     |
+| Frontend/CSP startup | Rendered `main`, loaded stylesheet, computed background, declared minimum width, no horizontal overflow                                                                                            |
+| Device inventory     | Real `get_device_snapshot` result with contract version and positive native sequence; rendered inventory agrees after startup and refresh; sanitized state/filesystem/confidence/count diagnostics |
+| Fixture separation   | Preview A-Cam/B-Cam cards disappear after native initialization                                                                                                                                    |
+| Local history        | Real `get_ingest_history` succeeds against the isolated empty store                                                                                                                                |
+| Read-only refresh    | Visible inventory refresh is an enabled focusable HTML button, driver click succeeds, and rendered inventory agrees with real native discovery                                                     |
+| Empty UI             | Checked only when actual native inventory is empty; otherwise explicitly skipped                                                                                                                   |
+| Screenshot           | `native-empty-state.png` or `native-workspace-redacted.png` comes from the driver's native WKWebView snapshot; sensitive text is hidden in place for capture and redaction is reported             |
+| Result/provenance    | `smoke-summary.json` contains counts, passed/skipped checks and limits; `run.json` records the test build and overall exit result                                                                  |
 
 The theme toggle and identity-detail panel are currently hidden when there is no
-selected media. The suite explicitly skips these checks in the normal empty
-runner; it cannot claim their macOS validation from empty-state success. The
-conditional code verifies focusability, driver clicks, theme state, and panel
-ARIA state only if a separately authorized test invokes the native suite with
-real observed media. The production launcher deliberately requires no media, and
-the screenshot test avoids retaining media details. Native stdout/stderr and raw
+selected media. The suite explicitly skips these checks when native inventory is
+empty; it cannot claim their macOS validation from empty-state success. When
+native inventory is present, the conditional code verifies focusability, driver
+clicks, theme state, and panel ARIA state against the actual rendered controls.
+Observed runner volumes are not physical-card certification. The screenshot
+temporarily hides names, paths, identity values, reader references, and
+destination/configuration text without changing element sizes or positions;
+the artifact explicitly records this redaction. Native stdout/stderr and raw
 device snapshots are not copied into published evidence.
 
 ## Limits
