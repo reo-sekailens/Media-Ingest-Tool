@@ -92,6 +92,63 @@ test("keeps native paths and identifiers out of standard WebDriver failures", as
   });
 });
 
+test("labels rejected and timed-out endpoints without leaking transport data", async () => {
+  for (const [name, category] of [
+    ["TypeError", "request rejected"],
+    ["TimeoutError", "request timeout"],
+    ["AbortError", "request aborted"],
+  ]) {
+    const privateText =
+      "/Users/private/secret-card native-session-private script-private";
+    const driver = new NativeWebDriver(4445, async () => {
+      const error = new Error(privateText);
+      error.name = name;
+      throw error;
+    });
+    driver.sessionId = "native-session-private";
+    await assert.rejects(
+      driver.execute(() => "script-private"),
+      (error) => {
+        assert.equal(error.message, `WebDriver POST execute-sync failed: ${category}`);
+        assert.doesNotMatch(
+          error.stack,
+          /\/Users\/private|secret-card|native-session-private|script-private|127\.0\.0\.1/,
+        );
+        assert.equal(error.cause, undefined);
+        return true;
+      },
+    );
+    await assert.rejects(
+      driver.createSession(),
+      new RegExp(`WebDriver POST create-session failed: ${category}`),
+    );
+  }
+});
+
+test("sanitizes response decoding and unrecognized server error categories", async () => {
+  const decoder = new NativeWebDriver(4445, async () => ({
+    json: async () => {
+      throw new Error("private response with /Users/secret-card");
+    },
+  }));
+  await assert.rejects(decoder.command("GET", "/status"), (error) => {
+    assert.equal(
+      error.message,
+      "WebDriver GET status failed: response decoding failed",
+    );
+    assert.doesNotMatch(error.stack, /private response|secret-card/);
+    return true;
+  });
+  const { driver } = fixtureDriver([
+    { status: 500, body: { value: { error: "private secret card" } } },
+  ]);
+  await assert.rejects(driver.command("GET", "/status"), (error) => {
+    assert.equal(error.message, "WebDriver GET status failed: HTTP 500, unknown error");
+    assert.doesNotMatch(error.stack, /private|secret/);
+    return true;
+  });
+});
+
 test("rejects success responses without the W3C value envelope", async () => {
   const { driver } = fixtureDriver([{ body: { ready: true } }]);
   await assert.rejects(

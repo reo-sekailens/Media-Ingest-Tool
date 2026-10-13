@@ -12,6 +12,7 @@ const evidence = {
   evidenceKind: "native-wkwebview-test-build",
   testDriver: "tauri-plugin-wdio-webdriver",
   mockedCommands: false,
+  startupComplete: false,
   tests: {},
   limitations: [
     "The embedded driver synthesizes DOM actions; physical keyboard behavior is not certified.",
@@ -20,6 +21,11 @@ const evidence = {
   ],
 };
 let snapshot;
+
+function startupStage(stage) {
+  evidence.startupStage = stage;
+  process.stdout.write(`Native startup stage: ${stage}\n`);
+}
 
 async function invokeReadOnly(command) {
   assert.ok(
@@ -76,7 +82,9 @@ async function focusButton(selector) {
 describe("macOS native startup and read-only workspace", () => {
   before(async () => {
     assert.equal(process.platform, "darwin", "This suite requires actual macOS");
+    startupStage("create-session");
     await browser.createSession();
+    startupStage("wait-frontend");
     await browser.waitUntil(
       async () =>
         await browser.execute(
@@ -87,6 +95,7 @@ describe("macOS native startup and read-only workspace", () => {
         ),
       { timeoutMsg: "The packaged WKWebView and real Tauri IPC did not initialize" },
     );
+    startupStage("read-native-inventory");
     snapshot = await invokeReadOnly("get_device_snapshot");
     assert.ok(Array.isArray(snapshot.devices), "Native inventory must be an array");
     assert.ok(Number.isInteger(snapshot.sequence), "Native snapshot must be sequenced");
@@ -102,9 +111,11 @@ describe("macOS native startup and read-only workspace", () => {
     process.stdout.write(
       `Native inventory summary: ${JSON.stringify(evidence.inventorySummary)}\n`,
     );
+    startupStage("wait-rendered-inventory");
     await browser.waitUntil(renderedInventoryMatchesNative, {
       timeoutMsg: "The UI did not replace preview fixtures with native inventory",
     });
+    evidence.startupComplete = true;
   });
 
   it("loads the bundled frontend and production stylesheet in WKWebView", async () => {

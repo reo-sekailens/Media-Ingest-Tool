@@ -190,6 +190,14 @@ macOS-specific CSP mismatch was found by static inspection.
 [Tauri CSP guidance](https://v2.tauri.app/security/csp/),
 [Tauri security configuration](https://v2.tauri.app/reference/config/#securityconfig).
 
+The installed, locked Vite 7.3.6 source and its version-specific documentation
+agree on Safari 16 for the default JavaScript build target. Tailwind 4's Safari
+16.4 requirement therefore sets the stricter configured WebKit baseline. The
+latest Vite documentation describes a newer major and must not be substituted
+for the checked-in version's behavior. Transpilation does not backport every
+browser API or CSS feature, and macOS 13.3 runtime acceptance remains unverified.
+[Vite 7 build target](https://v7.vite.dev/config/build-options#build-target).
+
 WKWebView persistence is distinct from the Rust-owned SQLite ledger. Tauri
 documents that `dataDirectory` is unsupported on macOS and its replacement
 data-store identifier needs macOS 14+. The app does not configure either;

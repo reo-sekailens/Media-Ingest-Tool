@@ -4,6 +4,33 @@ import { setTimeout } from "node:timers/promises";
 import { Buffer } from "node:buffer";
 
 const elementKey = "element-6066-11e4-a52e-4f735466cecf";
+const standardErrors = new Set([
+  "invalid argument",
+  "invalid session id",
+  "javascript error",
+  "no such element",
+  "no such window",
+  "script timeout",
+  "session not created",
+  "stale element reference",
+  "timeout",
+  "unknown command",
+  "unknown error",
+  "unsupported operation",
+]);
+
+function endpointCategory(endpoint) {
+  if (endpoint === "/session") return "create-session";
+  if (endpoint === "/status") return "status";
+  const routes = [
+    [/^\/session\/[^/]+\/execute\/sync$/, "execute-sync"],
+    [/^\/session\/[^/]+\/element$/, "find-element"],
+    [/^\/session\/[^/]+\/element\/[^/]+\/click$/, "element-click"],
+    [/^\/session\/[^/]+\/screenshot$/, "screenshot"],
+    [/^\/session\/[^/]+$/, "session"],
+  ];
+  return routes.find(([pattern]) => pattern.test(endpoint))?.[1] || "other";
+}
 
 // This adapter only speaks the embedded driver's W3C HTTP protocol. It does not
 // install Tauri API mocks, alter command responses, or use a browser dev server.
@@ -18,26 +45,42 @@ export class NativeWebDriver {
   }
 
   async command(method, endpoint, body) {
-    const response = await this.request(`${this.baseUrl}${endpoint}`, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(30_000),
-    });
-    const data = await response.json();
+    const label = `WebDriver ${method} ${endpointCategory(endpoint)}`;
+    let response;
+    try {
+      response = await this.request(`${this.baseUrl}${endpoint}`, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (error) {
+      const category =
+        error?.name === "TimeoutError"
+          ? "request timeout"
+          : error?.name === "AbortError"
+            ? "request aborted"
+            : "request rejected";
+      // Raw transport causes can expose private URLs, scripts or native paths.
+      // eslint-disable-next-line preserve-caught-error
+      throw new Error(`${label} failed: ${category}`);
+    }
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error(`${label} failed: response decoding failed`);
+    }
     if (!response.ok || data.value?.error) {
       // Native exception messages can contain private paths or identifiers.
       // Keep only the standardized error category in published test output.
-      const category = String(data.value?.error || "unknown error").replace(
-        /[^a-z -]/gi,
-        "",
-      );
-      throw new Error(
-        `WebDriver ${method} failed: HTTP ${response.status}, ${category}`,
-      );
+      const category = standardErrors.has(data.value?.error)
+        ? data.value.error
+        : "unknown error";
+      throw new Error(`${label} failed: HTTP ${response.status}, ${category}`);
     }
     if (!Object.hasOwn(data, "value")) {
-      throw new Error("WebDriver response is missing its W3C value envelope");
+      throw new Error(`${label} response is missing its W3C value envelope`);
     }
     return data.value;
   }

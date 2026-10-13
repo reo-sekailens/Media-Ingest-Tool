@@ -12,7 +12,7 @@ task_mount="$task_root/mounted"
 task_apfs="$task_root/apfs-destination"
 mkdir "$task_mount" "$task_apfs"
 detach_fixture() {
-  local mount="$1" status attempt
+  local mount="$1" status attempt mounts
   if [[ "$mount" != "$task_mount" && "$mount" != "$task_apfs" ]]; then
     echo 'Refusing to detach a volume outside the owned filesystem fixtures' >&2
     return 1
@@ -20,10 +20,20 @@ detach_fixture() {
   # Background filesystem services may briefly hold a new image busy after
   # the test processes close. Retry only EBUSY, never force-eject a volume.
   for attempt in {1..15}; do
+    mounts="$(/sbin/mount)" || return 1
+    if [[ "$mounts" != *" on $mount ("* ]]; then
+      return 0
+    fi
     if /usr/bin/hdiutil detach "$mount"; then
       return 0
     else
       status=$?
+      # EBUSY can precede an asynchronous detach completing. A vanished
+      # owned mount is success even when the next detach reports ENOENT.
+      mounts="$(/sbin/mount)" || return 1
+      if [[ "$mounts" != *" on $mount ("* ]]; then
+        return 0
+      fi
       if [[ "$status" != 16 || "$attempt" == 15 ]]; then
         return "$status"
       fi
