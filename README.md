@@ -87,7 +87,10 @@ See [Mac installation and permissions](docs/macos-installation.md) and the
 [compatibility review and validation boundaries](docs/macos-compatibility.md).
 Quality checks cover macOS 15/26 on both architectures, including native core,
 disposable APFS/exFAT images, actual WKWebView smoke checks and independently
-checked shipping DMG startup. These checks require successful hosted results;
+checked shipping DMG startup. [Final software/UI checks](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268)
+pass all 16 jobs; [the production candidate](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38349630929)
+passes all four DMG gates with independently verified downloaded hashes. These
+snapshots remain on an isolated branch, without a stable release;
 physical reader/card, privacy-consent, sleep/wake, and macOS 13.3 runtime
 acceptance remain separate. **macOS Quick Format is unavailable.**
 

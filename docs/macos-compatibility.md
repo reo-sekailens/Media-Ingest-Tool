@@ -62,10 +62,51 @@ versions, every M-series chip model, peripherals, storage servers, or camera for
 
 ## Validation record
 
-Local checks and hosted exact-source evidence will be recorded here after the
-integration snapshot completes. Parser/fixture tests on Windows are not Mac
-runtime or installation evidence. Native UI tests run the real Tauri app with
-an embedded test driver; shipping DMG startup is checked independently.
+Production candidate: `9e4c4fadc1c615677fd61c0cf6c68c78fea30c85`,
+[installer/core evidence](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38349630929).
+All four production app/DMG gates passed, including signature verification,
+architecture/deployment/dependencies, copy from a read-only DMG, detach and
+fresh-profile LaunchServices startup. All four downloaded DMGs independently
+matched their manifests, checksums, validation reports and source provenance.
+
+| Native target | Actual OS | Core Rust  | Mounted-filesystem checks | Shipping DMG/startup | Native UI                    |
+| ------------- | --------- | ---------- | ------------------------- | -------------------- | ---------------------------- |
+| Intel         | 15.7.9    | 142 passed | 21 passed                 | passed               | 5 passed, 1 conditional skip |
+| Apple Silicon | 15.7.9    | 142 passed | 21 passed                 | passed               | 5 passed, 1 conditional skip |
+| Intel         | 26.6.1    | 142 passed | 21 passed                 | passed               | 5 passed, 1 conditional skip |
+| Apple Silicon | 26.6.2    | 142 passed | 21 passed                 | passed               | 5 passed, 1 conditional skip |
+
+Core suites skipped five physical-hardware cases and two disposable-image cases;
+the latter were explicitly executed by the filesystem script. Each of the 21
+image invocations actually ran one test: nine on APFS, nine on case-sensitive
+APFS, and three ExFAT checks. Those exercise normal copy/readback/publication,
+collisions, cancellation/recovery, receipts, metadata exclusions, ExFAT-to-APFS
+production completion/SQLite reopen/marker upgrade, and safe ExFAT-destination
+refusal. They do not certify physical storage or power loss.
+
+Native UI evidence uses the harness correction in `0984bc7`,
+[final Quality run](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268).
+All 16 software/UI jobs passed; each of four Mac hosts again passed 142 core
+tests and 21 mounted-image invocations. Distribution was intentionally skipped
+in this check-only run because production packages had already been verified.
+The production app, configuration, dependency locks and frontend sources are
+identical to the verified `9e4c4fa` installers; only the adapter, its contracts
+and documentation changed. All four lanes passed on their first attempt,
+checking real WKWebView rendering, read-only IPC/history, refresh, empty state
+and native screenshots. Media panels were explicitly skipped with zero admitted
+media. The debug-only driver is absent from the shipping builds.
+
+The initial Mac26 ARM test adapter used legacy `execute/sync`, which timed out
+before product IPC. Failure evidence was preserved outside the checkout. The
+corrected adapter follows the pinned official embedded `/wdio/eval` route and
+its Mac26 safeguards, with unchanged deadlines and no automatic harness retry.
+The identical test binary then passed. See [the mechanism](macos-ui-validation.md).
+
+Frontend checks include 100 tests, TypeScript, ESLint, formatting and production
+builds across all six quality hosts. Packaging/diagnostic scripts have 30 portable
+checks and the native transport has 10 contracts. Windows strict Rust/format
+checks and repository memory validation also pass. Fixtures on Windows are not
+Mac runtime evidence; shipping startup and instrumented UI remain separate.
 
 ## Remaining acceptance boundaries
 

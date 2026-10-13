@@ -33,6 +33,15 @@ Nightlies are prereleases. Check the source commit and architecture in
 shasum -a 256 "downloaded-package.dmg"
 ```
 
+The compatibility candidate `9e4c4fa` is available as verified CI artifacts:
+[Intel](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38349630929/artifacts/11790841774)
+and [Apple Silicon](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38349630929/artifacts/11790706333).
+These have not been published as a stable release. Extract the artifact ZIP,
+then use its `dmg/` installer and original `SHA256SUMS`/`artifact-manifest.json`.
+Use the DMG rather than the loose `.app` files in a CI archive, which may not
+retain executable permissions. GitHub artifact downloads require GitHub sign-in;
+the app itself requires no account.
+
 ## Install and first launch
 
 1. Open the matching DMG in Finder.

@@ -71,6 +71,15 @@ failure tests on Windows do not count as Mac installation results.
 
 ## Installing a downloaded DMG
 
+The four native production gates passed for source
+`9e4c4fadc1c615677fd61c0cf6c68c78fea30c85` in
+[run 38349630929](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38349630929).
+Actual hosts were Intel/ARM macOS 15.7.9, Intel 26.6.1 and ARM 26.6.2.
+Downloaded bytes were independently checked against each native report,
+manifest and SHA256SUMS. The overall run had a separate ARM26 test-driver
+failure; no production DMG gate failed. The corrected native UI harness has
+separate passing evidence in the [compatibility record](macos-compatibility.md).
+
 Choose the artifact matching **Apple menu → About This Mac**: **Chip** indicates
 Apple Silicon; **Processor: Intel** indicates Intel. Verify the DMG against the
 release's SHA256SUMS, open the image, copy **Media Ingest Tool.app** into

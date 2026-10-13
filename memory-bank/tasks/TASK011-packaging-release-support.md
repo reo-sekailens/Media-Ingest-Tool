@@ -1,6 +1,6 @@
 # TASK011 — Packaging, release, and supported-platform contract
 
-- **Status:** in progress — five-target automation, hosted Quality and nightly package publication are verified. Version-tag publication, signing/notarization, clean-machine install/start, SBOM, audits, and hardware-certified runtime support remain pending.
+- **Status:** in progress — five-target automation, hosted Quality and nightly package publication are verified. Intel/ARM Mac ad-hoc DMGs pass native install-copy/startup on 15/26. Version-tag publication, Developer ID/notarization, download quarantine/privacy, oldest runtime, SBOM, audits, and hardware-certified support remain pending.
 - **Depends on:** TASK001, TASK009, TASK010
 
 ## Objective
@@ -43,7 +43,15 @@ checks, debug-only separate-ID WKWebView automation and independent shipping
 DMG verification. Packaging requires valid ad-hoc signatures before/after copy,
 matching plist/privacy/icon, native Mach-O architecture, bounded deployment
 target, system/bundled dependencies and fresh-profile LaunchServices startup.
-Exact-source hosted results remain pending. The test driver is not shipped.
+[Candidate run 38349630929](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38349630929)
+at `9e4c4fa` passes all four production DMG gates on native Intel/ARM macOS 15/26.
+All downloaded DMGs independently match their manifests, SHA256SUMS, validation
+reports and source commit. Matching Mac15-built installers and original metadata
+are saved under ignored `output/macos-compatibility/9e4c4fa`.
+[Final Quality run 38351288268](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268)
+passes all 16 software/UI jobs at `0984bc7`. Only the test adapter/contracts/docs
+differ from the verified installers; production inputs are unchanged. The test
+driver is not shipped. No stable/default-branch release is inferred or published.
 
 See [compatibility coverage](../../docs/macos-compatibility.md),
 [package gate](../../docs/macos-package-validation.md) and

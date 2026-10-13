@@ -26,9 +26,19 @@
   independently checked DMG installation/startup and native WKWebView/read-only
   IPC. UI instrumentation is debug-only, separate-ID, loopback-only, and rejected
   by release compilation. Node validation has no additional JS dependencies.
-- Integration checks and exact-source hosted evidence are still being collected.
-  Original unrelated working changes remain preserved; remote validation uses an
-  isolated snapshot branch. No physical-card, TCC/Gatekeeper, native keyboard,
+- [Final Quality run 38351288268](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268)
+  passed all 16 software/UI jobs at `0984bc7`: each of four Mac hosts passed 142
+  core tests, 21 explicit image tests, and native rendering/read-only IPC checks.
+  The Mac26 ARM harness now uses the pinned official embedded evaluation route;
+  all four UI checks passed on their first attempt with unchanged deadlines.
+- [Production candidate run 38349630929](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38349630929)
+  passed all four DMG/signature/copy/startup gates at `9e4c4fa`. Downloaded bytes
+  match all manifests/checksums/reports. Only the UI adapter/contracts/docs differ
+  at `0984bc7`; production inputs are identical. Matching Intel/ARM installers and
+  original metadata are retained under ignored `output/macos-compatibility/9e4c4fa`.
+  Original unrelated working changes remain preserved; remote validation uses
+  `codex/macos-compatibility-validation`, without a default-branch release.
+  No physical-card, TCC/Gatekeeper, native keyboard,
   sleep/wake, macOS 13.3 runtime, power-loss or network-volume certification is
   inferred from documentation, fixtures or runner tests.
 

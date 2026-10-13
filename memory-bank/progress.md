@@ -8,7 +8,14 @@
   SQLite full-sync verification and safe nested destination resolution.
 - Added four native Mac runner variants, disposable APFS/exFAT gates, shipping
   DMG copy/signature/deployment/startup checks and isolated WKWebView/read-only
-  IPC screenshots. Integration/hosted results are pending; see
+  IPC screenshots. [Final Quality](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268)
+  at `0984bc7` passes all 16 jobs, with 142 core tests and 21 explicit mounted-image
+  tests on each Mac target; all four native UI lanes pass on their first attempt.
+  [Production candidate](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38349630929)
+  `9e4c4fa` passes all four DMG/copy/signature/startup gates, with independently
+  verified downloaded hashes/provenance. Production inputs are unchanged in the
+  final harness correction. Matching Intel/ARM DMGs and original metadata remain
+  in ignored `output/macos-compatibility/9e4c4fa`; no stable release was published. See
   [macOS compatibility](../docs/macos-compatibility.md) for scope and evidence.
   Physical media, TCC/quarantine/keyboard, sleep/wake, oldest runtime and Mac
   quick-format implementation remain outside available evidence.

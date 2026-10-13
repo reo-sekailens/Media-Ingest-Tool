@@ -1,6 +1,6 @@
 # TASK002 — Cross-platform storage discovery, details, and identity
 
-- **Status:** In progress — Windows read-only removable-volume enumeration, event-driven Configuration Manager disk-interface monitoring, storage-descriptor/physical-device/SCSI-LUN topology query, bounded VPD page 0x83 parsing, compact app-marker discovery, and conservative identity normalization are implemented and locally unit-tested. On a direct native Windows SD stack only, discovery now attempts the documented CMD2 CID read and promotes a valid 16-byte response to `hardware_immutable`; USB mass-storage readers remain unresolved when they cannot forward the command. Each new verified writable input card now receives a <=128-byte `MIT2` record with a random managed-card token and path-free BLAKE3 content witness. That record remains mutable/copyable filesystem evidence: VPD and markers can never unlock automatic recall or formatting. Linux reads `/proc/self/mountinfo`, `/sys/class/block`, and filesystem space directly without shell parsing. macOS now registers native Disk Arbitration appeared, description-changed, and disappeared callbacks before taking its first watcher snapshot; callbacks emit only a coalesced wakeup, followed by a fresh trusted Rust snapshot. Its structured `diskutil` fallback descends from whole disks into `Partitions` and `APFSVolumes`, then accepts only mounted, readable, non-internal, non-virtual media with explicit `RemovableMediaOrExternalDevice` evidence. Native description/IOKit parent projection, macOS runtime/hardware evidence, and sandbox/distribution validation remain pending.
+- **Status:** In progress — Windows read-only removable-volume enumeration, event-driven Configuration Manager disk-interface monitoring, storage-descriptor/physical-device/SCSI-LUN topology query, bounded VPD page 0x83 parsing, compact app-marker discovery, and conservative identity normalization are implemented and locally unit-tested. On a direct native Windows SD stack only, discovery now attempts the documented CMD2 CID read and promotes a valid 16-byte response to `hardware_immutable`; USB mass-storage readers remain unresolved when they cannot forward the command. Each new verified writable input card now receives a <=128-byte `MIT2` record with a random managed-card token and path-free BLAKE3 content witness. That record remains mutable/copyable filesystem evidence: VPD and markers can never unlock automatic recall or formatting. Linux reads `/proc/self/mountinfo`, `/sys/class/block`, and filesystem space directly without shell parsing. macOS now registers native Disk Arbitration appeared, description-changed, and disappeared callbacks before taking its first watcher snapshot; callbacks emit only a coalesced wakeup, followed by a fresh trusted Rust snapshot. Its structured `diskutil` fallback descends from whole disks into `Partitions` and `APFSVolumes`, then accepts only mounted, readable, non-internal, non-virtual media with explicit `RemovableMediaOrExternalDevice` evidence. Native Intel/ARM macOS 15/26 adapter, Disk Arbitration, read-only IPC and package-startup checks pass; physical reader/card lifecycle, full IOMedia topology, privacy/quarantine, and oldest runtime remain unverified. Sandboxed distribution is separately scoped.
 - **Owner:** Unassigned
 - **Priority:** P0
 - **Depends on:** TASK001 desktop foundation and shared IPC contracts
@@ -90,6 +90,14 @@ Use Win32 Configuration Manager/SetupAPI plus storage/volume IOCTLs. Do not make
 Windows session identifiers (`PhysicalDriveN`, drive letters, volume mount paths, device interface strings) are never medium keys. Surprise removal must invalidate the generation and close all handles before any queued copy/format work proceeds.
 
 ### macOS
+
+2026-10-13 evidence: [Quality run 38351288268](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268)
+at `0984bc7` passes native adapter/Disk Arbitration tests and real read-only
+inventory/refresh IPC on Intel/ARM macOS 15/26. Runner disk images with absent
+virtual/physical fields are excluded by the exact Disk Image bus classification;
+readable USB/read-only projections remain eligible. This proves the observed
+runner and API behavior, not physical-card, reader, TCC or hotplug certification.
+See [the native review](../../docs/macos-native-review.md).
 
 Use Disk Arbitration for disk/media lifecycle and IOKit/IOUSBHost for the physical parent topology.
 

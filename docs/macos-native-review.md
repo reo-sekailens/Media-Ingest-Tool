@@ -86,12 +86,15 @@ also rejects the exact case-insensitive `BusProtocol = Disk Image` enum. A
 runner-shaped regression keeps the absent virtual field and read-only/removable
 flags, rejects the image, then substitutes `USB` and proves the readable
 read-only physical-source policy remains eligible. Diagnostic policy mirrors
-this additional reason for the next native validation. The fix does not impose
+this additional reason in native validation. The fix does not impose
 an empty-inventory expectation or hide other external volumes.
 
-The admission correction is locally tested source behavior until a later
-source-specific native runner snapshot verifies its result. These observed
-counts vary by runner/run and do not certify any physical card.
+[Final native run 38351288268](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268)
+at `0984bc7` passes the core adapter/Disk Arbitration tests on all four native
+Mac15/26 Intel/ARM hosts. Native UI snapshots admit zero media, and real inventory
+IPC and refresh agree with that empty state. The production adapter is unchanged
+from the verified `9e4c4fa` DMGs. These observed counts vary by runner/run and do
+not certify any physical card, card lifecycle or permission prompt.
 
 ## Read-only source flow
 

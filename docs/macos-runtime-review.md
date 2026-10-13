@@ -13,8 +13,9 @@ The integration implements MAC-R01 (minimum 13.3), MAC-R02 (exclusive macOS
 publication), MAC-R03 (shared exact root metadata exclusions), MAC-R04 (nearest
 existing ancestor with traversal/overlap rejection), MAC-R06 (macOS fullfsync
 plus file-backed WAL/FULL readback), and MAC-R07 (five purpose strings and
-permission guidance). Their Mac runtime/package checks are pending the new
-exact-source hosted run. MAC-R05 directory-entry durability and MAC-R08 physical
+permission guidance). Their native core/image and package checks passed on
+Intel/ARM macOS 15/26; see the exact evidence below and in the compatibility
+record. MAC-R05 directory-entry durability and MAC-R08 physical
 sleep/wake remain open. The finding table below describes the initial baseline,
 not the current fixed source. See [current validation](macos-compatibility.md).
 

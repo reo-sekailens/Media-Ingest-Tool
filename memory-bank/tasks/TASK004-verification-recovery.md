@@ -225,8 +225,13 @@ Retry only classified transient failures (temporary sharing violation, disconnec
   `renamex_np(RENAME_EXCL)` and adds competing-file, occupied receipt and dangling
   symlink regressions. Collisions preserve the verified partial and existing
   destination; unsupported exclusive rename remains an error. Windows metadata
-  inventory/nested-destination checks pass, and Mac APFS/APFSX/exFAT native checks
-  are queued. SQLite on macOS enables/verifies fullfsync and reads back WAL/FULL
+  inventory/nested-destination checks pass. Each of four Intel/ARM Mac15/26
+  hosts passes 142 core tests and 21 explicit APFS/APFSX/exFAT invocations in
+  [run 38351288268](https://github.com/reo-sekailens/Media-Ingest-Tool/actions/runs/38351288268)
+  at `0984bc7`. Positive ExFAT-source-to-APFS completion seals the receipt,
+  reopens SQLite, upgrades the marker and preserves source bytes/mtime;
+  unsupported ExFAT destinations retain the source/partial without publication.
+  SQLite on macOS enables/verifies fullfsync and reads back WAL/FULL
   on file-backed reopen. Directory-entry durability and physical power-loss
   guarantees remain unverified; macOS formatting remains unavailable.
 
