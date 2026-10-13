@@ -11,18 +11,39 @@ task_root="$(cd "$task_root" && pwd -P)"
 task_mount="$task_root/mounted"
 task_apfs="$task_root/apfs-destination"
 mkdir "$task_mount" "$task_apfs"
+detach_fixture() {
+  local mount="$1" status attempt
+  if [[ "$mount" != "$task_mount" && "$mount" != "$task_apfs" ]]; then
+    echo 'Refusing to detach a volume outside the owned filesystem fixtures' >&2
+    return 1
+  fi
+  # Background filesystem services may briefly hold a new image busy after
+  # the test processes close. Retry only EBUSY, never force-eject a volume.
+  for attempt in {1..15}; do
+    if /usr/bin/hdiutil detach "$mount"; then
+      return 0
+    else
+      status=$?
+      if [[ "$status" != 16 || "$attempt" == 15 ]]; then
+        return "$status"
+      fi
+    fi
+    /bin/sleep 1
+  done
+}
 cleanup() {
   if /sbin/mount | /usr/bin/grep -Fq " on $task_mount ("; then
-    /usr/bin/hdiutil detach "$task_mount"
+    detach_fixture "$task_mount"
   fi
   if /sbin/mount | /usr/bin/grep -Fq " on $task_apfs ("; then
-    /usr/bin/hdiutil detach "$task_apfs"
+    detach_fixture "$task_apfs"
   fi
 }
 trap cleanup EXIT
 /usr/bin/hdiutil create -size 512m -type SPARSE -fs APFS \
   -volname MIT-Destination "$task_root/destination.sparseimage"
 /usr/bin/hdiutil attach -nobrowse -mountpoint "$task_apfs" "$task_root/destination.sparseimage"
+/usr/bin/touch "$task_apfs/.metadata_never_index"
 for filesystem in APFS APFSX ExFAT; do
   image="$task_root/$filesystem.sparseimage"
   if [[ "$filesystem" == APFSX ]]; then
@@ -35,6 +56,7 @@ for filesystem in APFS APFSX ExFAT; do
       -volname "MIT-$filesystem" "$image"
   fi
   /usr/bin/hdiutil attach -nobrowse -mountpoint "$task_mount" "$image"
+  /usr/bin/touch "$task_mount/.metadata_never_index"
   mkdir "$task_mount/fixtures"
   # Verify the actual case policy instead of trusting the requested format name.
   printf 'case probe\n' > "$task_mount/fixtures/CaseProbe"
@@ -59,7 +81,7 @@ for filesystem in APFS APFSX ExFAT; do
     TMPDIR="$task_mount/fixtures" cargo test --locked --manifest-path src-tauri/Cargo.toml \
       'ingest::tests::inventory_excludes_mac_volume_metadata_but_keeps_nested_names_and_dotfiles' \
       -- --exact --test-threads=1
-    /usr/bin/hdiutil detach "$task_mount"
+    detach_fixture "$task_mount"
     continue
   fi
   echo "Validating verified ingest on disposable $filesystem destination"
@@ -78,7 +100,7 @@ for filesystem in APFS APFSX ExFAT; do
     TMPDIR="$task_mount/fixtures" cargo test --locked --manifest-path src-tauri/Cargo.toml \
       "ingest::tests::$test" -- --exact --test-threads=1 --nocapture
   done
-  /usr/bin/hdiutil detach "$task_mount"
+  detach_fixture "$task_mount"
 done
-/usr/bin/hdiutil detach "$task_apfs"
+detach_fixture "$task_apfs"
 echo "APFS/APFSX ingest, exFAT source ingest, and exFAT destination safety checks passed"
